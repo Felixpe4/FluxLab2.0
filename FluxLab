@@ -80,12 +80,11 @@ def guardar_config(datos: dict) -> None:
 
 _CONFIG = _leer_config()
 
-# ── API Key de Anthropic (variable de entorno > config.json > appkey.txt) ────
-ANTHROPIC_API_KEY = (os.getenv("ANTHROPIC_API_KEY", "") or _CONFIG.get("anthropic_api_key", "")).strip()
+# ── Usuarios internos (config.json > admin/admin123 de fábrica) ──────────────
+USUARIOS = _CONFIG.get("usuarios") or {"admin": "admin123"}
 
-# ── Usuarios autorizados (config.json: "usuarios": {"usuario": "contraseña"}) ─
-# Mismas credenciales que se usan para entrar al portal del laboratorio (Toronja).
-USUARIOS = _CONFIG.get("usuarios") or {}
+# ── API Key de Anthropic (config.json > variable de entorno > appkey.txt) ────
+ANTHROPIC_API_KEY = (_CONFIG.get("anthropic_api_key") or os.getenv("ANTHROPIC_API_KEY", "")).strip()
 
 # ── Carpetas ──────────────────────────────────────────────────────────────────
 DATA_DIR      = APP_DIR / "data"
@@ -109,9 +108,8 @@ def obtener_api_key() -> str:
     return ""
 
 def falta_configuracion() -> bool:
-    """True si falta la API key de Anthropic. El usuario y contraseña del portal
-    del laboratorio (Toronja) se piden cada vez en la pantalla de acceso."""
-    return not obtener_api_key()
+    """True si falta algún dato esencial: API key o credenciales del portal del laboratorio."""
+    return not (obtener_api_key() and LAB_USER and LAB_PASS)
 
 def asegurar_chromium() -> bool:
     """
@@ -156,7 +154,7 @@ def texto_plano(texto: str) -> str:
     normal = re.sub(r"[^A-Z0-9]+", " ", normal)
     return re.sub(r"\s+", " ", normal).strip()
 
-CLAVE_ETIQUETA_RE = re.compile(r"\b(MU|OB|NOG|GYM)[\s\-]*(\d+)\b", re.IGNORECASE)
+CLAVE_ETIQUETA_RE = re.compile(r"\b(MU|OB)[\s\-]*(\d+)\b", re.IGNORECASE)
 
 def extraer_mu(texto: str) -> str:
     m = CLAVE_ETIQUETA_RE.search(str(texto))
@@ -203,7 +201,7 @@ def pagina_mu_item(item: dict) -> int:
             texto = Path(str(fuente)).stem.upper()
         except Exception:
             texto = str(fuente).upper()
-        m = re.search(r"\b(?:MU|OB|NOG|GYM)[\s\-]*\d+\s+(\d{1,3})(?=\D|$)", texto)
+        m = re.search(r"\b(?:MU|OB)[\s\-]*\d+\s+(\d{1,3})(?=\D|$)", texto)
         if m:
             try:
                 return int(m.group(1))
@@ -357,301 +355,101 @@ DOCTORES_OPCIONES = [
 # Sube cada nuevo .exe como "Release" en este repositorio (puede ser privado);
 # la app consulta la API de GitHub para saber si hay una versión más nueva.
 # IMPORTANTE: al sacar una versión nueva, recuerda subir también este número.
-APP_VERSION = "5.4"
-GITHUB_REPO = "Felixpe4/FluxLabv5.2"
+APP_VERSION = "4.3.1"
+GITHUB_REPO = "Felixpe4/FluxLab"
 
 def _version_tupla(version: str) -> tuple:
     return tuple(int(n) for n in re.findall(r"\d+", str(version)))
 
-# ── Cache de actualizaciones (evita consultar GitHub en cada arranque) ────────
-_UPDATE_CACHE = APP_DIR / "_update_cache.json"
-
-def _leer_cache_update() -> dict:
-    try:
-        return json.loads(_UPDATE_CACHE.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
-
-def _guardar_cache_update(version: str) -> None:
-    try:
-        _UPDATE_CACHE.write_text(
-            json.dumps({"version": version, "ts": time.time()},
-                       ensure_ascii=False), encoding="utf-8")
-    except Exception:
-        pass
-
-def _verificar_permiso_escritura() -> str:
-    """Devuelve "" si podemos escribir en la carpeta del exe, o mensaje de error."""
-    if not getattr(sys, "frozen", False):
-        return "modo script"
-    try:
-        prueba = pathlib.Path(sys.executable).parent / "_wr_test_.tmp"
-        prueba.write_bytes(b"ok")
-        prueba.unlink()
-        return ""
-    except PermissionError:
-        return ("Sin permisos de escritura en la carpeta del programa.\n"
-                "Cierra FluxLab, haz clic derecho en el ícono → "
-                "\"Ejecutar como administrador\" e intenta de nuevo.")
-    except Exception as e:
-        return f"No se puede escribir en la carpeta del programa: {e}"
-
 def buscar_actualizacion():
     """
-    Consulta la última Release de GitHub. Devuelve (version, url, tamaño)
-    o None. Nunca lanza excepción.
-    Protecciones incluidas:
-      - Cache de 30 min para no spamear GitHub en cada arranque
-      - Espera aleatoria 0-8 s para distribuir carga entre sucursales
-      - Token opcional en config.json ("github_token") para repos privados
-      - 3 reintentos con backoff si GitHub falla transitoriamente
+    Consulta la última Release publicada en GitHub. Si hay una versión más
+    nueva que APP_VERSION y trae un .exe adjunto, devuelve
+    (version_nueva, url_descarga); si no hay nada nuevo o algo falla
+    (sin internet, repo no configurado, etc.) devuelve None — nunca lanza.
     """
     if not GITHUB_REPO or "/" not in GITHUB_REPO or "TU_USUARIO" in GITHUB_REPO:
         return None
-
-    # No consultar GitHub más de una vez cada 30 minutos
-    cache = _leer_cache_update()
-    if time.time() - cache.get("ts", 0) < 1800:
-        ver_cache = cache.get("version", "")
-        if not ver_cache or _version_tupla(ver_cache) <= _version_tupla(APP_VERSION):
+    try:
+        import urllib.request
+        url = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+        peticion = urllib.request.Request(url, headers={
+            "Accept": "application/vnd.github+json",
+            "User-Agent": APP_NAME,
+        })
+        with urllib.request.urlopen(peticion, timeout=10) as resp:
+            datos = json.loads(resp.read().decode("utf-8"))
+        version_remota = str(datos.get("tag_name", "")).strip().lstrip("vV")
+        if not version_remota or _version_tupla(version_remota) <= _version_tupla(APP_VERSION):
             return None
+        for asset in datos.get("assets", []):
+            if str(asset.get("name", "")).lower().endswith(".exe"):
+                url_descarga = asset.get("browser_download_url", "")
+                if url_descarga:
+                    return (version_remota, url_descarga)
+        return None
+    except Exception:
+        return None
 
-    import urllib.request, random
-    # Distribuir las consultas de todas las sucursales en 0-8 s
-    time.sleep(random.uniform(0, 8))
-
-    token = (_CONFIG.get("github_token") or os.getenv("GITHUB_TOKEN", "")).strip()
-    headers = {"Accept": "application/vnd.github+json", "User-Agent": APP_NAME}
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-
-    url = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
-    for intento in range(3):
-        try:
-            with urllib.request.urlopen(
-                    urllib.request.Request(url, headers=headers), timeout=15) as resp:
-                datos = json.loads(resp.read().decode("utf-8"))
-            version_remota = str(datos.get("tag_name", "")).strip().lstrip("vV")
-            if not version_remota:
-                return None
-            _guardar_cache_update(version_remota)
-            if _version_tupla(version_remota) <= _version_tupla(APP_VERSION):
-                return None
-            for asset in datos.get("assets", []):
-                if str(asset.get("name", "")).lower().endswith(".exe"):
-                    url_desc = asset.get("browser_download_url", "")
-                    if url_desc:
-                        return (version_remota, url_desc, int(asset.get("size", 0)))
-            return None
-        except Exception:
-            if intento < 2:
-                time.sleep(4 * (intento + 1))
-    return None
-
-
-def preparar_actualizacion(url_descarga: str, version_nueva: str,
-                           tamano_esperado: int = 0, log_fn=None) -> bool:
+def preparar_actualizacion(url_descarga: str, version_nueva: str, log_fn=None) -> bool:
     """
-    Descarga, valida e instala la actualización de forma segura.
-    Cubre: permisos, red lenta, antivirus, SmartScreen, proceso bloqueado.
-    Usa PowerShell (más fiable que .bat) con fallback a .bat si PS falla.
+    Descarga el .exe nuevo y deja listo su reemplazo. Windows no permite
+    sobrescribir un .exe en ejecución, así que se genera un script auxiliar
+    que: espera a que esta app cierre (vigilando su PID), borra el .exe
+    viejo, pone en su lugar al nuevo y vuelve a abrir la app — todo de forma
+    automática, sin que la persona tenga que hacer nada.
+    Solo aplica empaquetado (.exe); en modo script no hay binario que reemplazar.
     """
     L = log_fn or (lambda *_a, **_k: None)
     if not getattr(sys, "frozen", False):
         return False
-
-    # ── 0. Verificar permisos ANTES de descargar nada ─────────────────────────
-    error_perm = _verificar_permiso_escritura()
-    if error_perm:
-        L(f"  No se puede actualizar: {error_perm}")
-        return False
-
-    import urllib.request
-    exe_actual = pathlib.Path(sys.executable)
-    exe_nuevo  = exe_actual.with_name(exe_actual.stem + "_nuevo.exe")
     try:
-        exe_nuevo.unlink(missing_ok=True)
-    except Exception:
-        pass
+        import urllib.request
+        exe_actual = pathlib.Path(sys.executable)
+        exe_nuevo  = exe_actual.with_name(exe_actual.stem + "_nuevo.exe")
+        urllib.request.urlretrieve(url_descarga, exe_nuevo)
 
-    # ── 1. Descarga con reintentos, timeout y progreso ────────────────────────
-    descargado = False
-    for intento in range(4):
-        if intento > 0:
-            espera = 5 * intento
-            L(f"  Reintentando descarga en {espera}s (intento {intento + 1}/4)...")
-            time.sleep(espera)
-        try:
-            req = urllib.request.Request(
-                url_descarga, headers={"User-Agent": APP_NAME})
-            with urllib.request.urlopen(req, timeout=240) as resp:
-                total    = int(resp.headers.get("Content-Length", tamano_esperado) or 0)
-                recibido = 0
-                ultimo   = -1
-                t_inicio = time.time()
-                with open(exe_nuevo, "wb") as f:
-                    while True:
-                        chunk = resp.read(131072)
-                        if not chunk:
-                            break
-                        f.write(chunk)
-                        recibido += len(chunk)
-                        if total:
-                            pct = recibido * 100 // total
-                            if pct // 5 != ultimo // 5:
-                                ultimo  = pct
-                                elapsed = time.time() - t_inicio or 0.1
-                                vel     = recibido / elapsed / 1024
-                                L(f"  Descargando {version_nueva}... {pct}%"
-                                  f"  ({recibido/1_048_576:.1f}/{total/1_048_576:.1f} MB"
-                                  f"  {vel:.0f} KB/s)")
-            descargado = True
-            break
-        except Exception as e:
-            L(f"  Error descarga (intento {intento + 1}/4): {e}")
-            try:
-                exe_nuevo.unlink(missing_ok=True)
-            except Exception:
-                pass
+        script = exe_actual.with_name("_actualizar_fluxlab.bat")
+        contenido = (
+            "@echo off\r\n"
+            "setlocal enabledelayedexpansion\r\n"
+            f"set PID={os.getpid()}\r\n"
+            f'set "VIEJO={exe_actual}"\r\n'
+            f'set "NUEVO={exe_nuevo}"\r\n'
+            ":espera\r\n"
+            "tasklist /FI \"PID eq %PID%\" 2>NUL | find \"%PID%\" >NUL\r\n"
+            "if not errorlevel 1 (\r\n"
+            "    timeout /t 1 /nobreak >nul\r\n"
+            "    goto espera\r\n"
+            ")\r\n"
+            "rem Aunque el proceso ya cerro, Windows (o el antivirus, que\r\n"
+            "rem suele escanear el .exe recien descargado) puede tardar un\r\n"
+            "rem momento extra en soltar el archivo viejo. Se espera un poco\r\n"
+            "rem y se reintenta el reemplazo varias veces antes de rendirse.\r\n"
+            "timeout /t 2 /nobreak >nul\r\n"
+            "set INTENTOS=0\r\n"
+            ":reintentar\r\n"
+            "move /y \"%NUEVO%\" \"%VIEJO%\" >nul 2>&1\r\n"
+            "if exist \"%NUEVO%\" (\r\n"
+            "    set /a INTENTOS+=1\r\n"
+            "    if !INTENTOS! LSS 20 (\r\n"
+            "        timeout /t 1 /nobreak >nul\r\n"
+            "        goto reintentar\r\n"
+            "    )\r\n"
+            ")\r\n"
+            "start \"\" \"%VIEJO%\"\r\n"
+        )
+        script.write_text(contenido, encoding="utf-8")
 
-    if not descargado:
-        L("  No se pudo descargar después de 4 intentos. Verifica tu conexión.")
-        return False
-
-    # ── 2. Detectar si el antivirus quarentenó el archivo ─────────────────────
-    time.sleep(2)   # dar tiempo al antivirus para actuar
-    if not exe_nuevo.exists():
-        L("  El antivirus eliminó el archivo descargado (cuarentena).\n"
-          "  Solución: agrega la carpeta de FluxLab a las exclusiones del antivirus"
-          " y vuelve a intentarlo.")
-        return False
-
-    # ── 3. Validar tamaño ─────────────────────────────────────────────────────
-    tamano_real = exe_nuevo.stat().st_size
-    if tamano_esperado and abs(tamano_real - tamano_esperado) > 8192:
-        L(f"  Archivo incompleto: {tamano_real:,} de {tamano_esperado:,} bytes.")
-        exe_nuevo.unlink(missing_ok=True)
-        return False
-
-    if tamano_real < 1_000_000:
-        L(f"  Archivo demasiado pequeño ({tamano_real:,} bytes) — posible error del servidor.")
-        exe_nuevo.unlink(missing_ok=True)
-        return False
-
-    # ── 4. Validar header MZ (ejecutable Windows real) ────────────────────────
-    try:
-        with open(exe_nuevo, "rb") as f:
-            if f.read(2) != b"MZ":
-                L("  El archivo descargado no es un ejecutable válido (posible"
-                  " página de error de GitHub en vez del .exe).")
-                exe_nuevo.unlink(missing_ok=True)
-                return False
-    except Exception as e:
-        L(f"  No se pudo verificar el ejecutable: {e}")
-        exe_nuevo.unlink(missing_ok=True)
-        return False
-
-    L(f"  Archivo descargado y verificado: {tamano_real/1_048_576:.1f} MB  ✓")
-
-    # ── 5. Script de instalación en PowerShell (más fiable que .bat) ──────────
-    # PowerShell maneja mejor los permisos, la espera de proceso y el
-    # relanzamiento. Se ejecuta con -ExecutionPolicy Bypass para que funcione
-    # en cualquier PC sin importar la política de ejecución configurada.
-    pid_app   = os.getpid()
-    nombre    = exe_actual.name
-    stem      = exe_actual.stem
-    ps_path   = exe_actual.with_name("_actualizar_fluxlab.ps1")
-    ps_script = (
-        f"$viejo  = '{exe_actual}'\r\n"
-        f"$nuevo  = '{exe_nuevo}'\r\n"
-        f"$pidApp = {pid_app}\r\n"
-        f"$nombre = '{nombre}'\r\n"
-        f"$stem   = '{stem}'\r\n"
-        "\r\n"
-        "# 1. Esperar que cierre el proceso original\r\n"
-        "while (Get-Process -Id $pidApp -ErrorAction SilentlyContinue) {\r\n"
-        "    Start-Sleep -Seconds 1\r\n"
-        "}\r\n"
-        "\r\n"
-        "# 2. Pausa para que el antivirus y Windows suelten los handles\r\n"
-        "Start-Sleep -Seconds 6\r\n"
-        "\r\n"
-        "# 3. Reemplazar exe con reintentos (hasta 40 s)\r\n"
-        "$ok = $false\r\n"
-        "for ($i = 0; $i -lt 40; $i++) {\r\n"
-        "    try {\r\n"
-        "        Move-Item -Force -LiteralPath $nuevo -Destination $viejo -ErrorAction Stop\r\n"
-        "        $ok = $true; break\r\n"
-        "    } catch {\r\n"
-        "        Start-Sleep -Seconds 1\r\n"
-        "    }\r\n"
-        "}\r\n"
-        "\r\n"
-        "if (-not $ok) {\r\n"
-        "    Add-Type -AssemblyName System.Windows.Forms\r\n"
-        "    [System.Windows.Forms.MessageBox]::Show(\r\n"
-        "        'No se pudo instalar la actualizacion.' + [char]10 +\r\n"
-        "        'Cierra cualquier ventana de FluxLab y vuelve a intentarlo,' + [char]10 +\r\n"
-        "        'o reemplaza el .exe manualmente.',\r\n"
-        "        'FluxLab - Error de actualizacion',\r\n"
-        "        [System.Windows.Forms.MessageBoxButtons]::OK,\r\n"
-        "        [System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null\r\n"
-        "    exit 1\r\n"
-        "}\r\n"
-        "\r\n"
-        "# 4. Relanzar la app (hasta 3 intentos)\r\n"
-        "for ($j = 0; $j -lt 3; $j++) {\r\n"
-        "    Start-Process -FilePath $viejo\r\n"
-        "    Start-Sleep -Seconds 5\r\n"
-        "    if (Get-Process -Name $stem -ErrorAction SilentlyContinue) { break }\r\n"
-        "}\r\n"
-        "\r\n"
-        "# 5. Auto-borrar este script\r\n"
-        "Remove-Item -LiteralPath $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyContinue\r\n"
-    )
-
-    try:
-        ps_path.write_text(ps_script, encoding="utf-8")
-    except Exception as e:
-        L(f"  No se pudo escribir el script de instalación: {e}")
-        exe_nuevo.unlink(missing_ok=True)
-        return False
-
-    import subprocess
-    try:
+        import subprocess
         subprocess.Popen(
-            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
-             "-WindowStyle", "Hidden", "-File", str(ps_path)],
+            ["cmd", "/c", "start", "", str(script)],
             creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
         )
         return True
     except Exception as e:
-        # Fallback a .bat si PowerShell no está disponible
-        L(f"  PowerShell no disponible ({e}), usando método alternativo...")
-        bat_path = exe_actual.with_name("_actualizar_fluxlab.bat")
-        bat = (
-            "@echo off\r\nsetlocal enabledelayedexpansion\r\n"
-            f"set PID={pid_app}\r\nset \"VIEJO={exe_actual}\"\r\n"
-            f"set \"NUEVO={exe_nuevo}\"\r\nset \"NOMBRE={nombre}\"\r\n"
-            ":w\r\ntasklist /FI \"PID eq %PID%\" 2>NUL | find \"%PID%\" >NUL\r\n"
-            "if not errorlevel 1 (timeout /t 1 /nobreak >nul & goto w)\r\n"
-            "timeout /t 6 /nobreak >nul\r\nset I=0\r\n"
-            ":r\r\nmove /y \"%NUEVO%\" \"%VIEJO%\" >nul 2>&1\r\n"
-            "if exist \"%NUEVO%\" (set /a I+=1 & if !I! LSS 40"
-            " (timeout /t 1 /nobreak >nul & goto r))\r\n"
-            "start \"\" \"%VIEJO%\"\r\ndel \"%~f0\"\r\n"
-        )
-        try:
-            bat_path.write_text(bat, encoding="utf-8")
-            subprocess.Popen(
-                ["cmd", "/c", "start", "", str(bat_path)],
-                creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
-            )
-            return True
-        except Exception as e2:
-            L(f"  No se pudo lanzar el instalador: {e2}")
-            exe_nuevo.unlink(missing_ok=True)
-            return False
+        L(f"No se pudo preparar la actualización: {e}")
+        return False
 
 # Dark theme — inspirado en Linear / Stripe / Windows 11 Fluent
 COLORS = {
@@ -808,71 +606,72 @@ CATALOGO = {
     "T4T": "T4T",  "T4":  "T4T",
     "T3L": "T3L",
     "T4L": "T4L",
-    "TSH": "TSH",  "TPO": "APOX", "APOX": "APOX", 
-    "ACTH": "ACTH", "PH": "PARAT",  "PTH": "PARAT", "PARAT": "PARAT",
-    "RF": "FEB", "FEB": "FEB", "PCT": "PROCALCITONINA", "PROCALCITONINA": "PROCALCITONINA",
-    "ACT": "ANTI-TIROG", "ACTI": "ANTI-TIROG", "TG":  "TIROGLOBULINA", "TIROGLOBULINA": "TIROGLOBULINA", "ANTI-TIROG": "ANTI-TIROG",
-    "VIH": "HIV", "HIV": "HIV", "PSA": "PSAE", "PSAE": "PSAE", "PSAL": "PSAF", "PSAF": "PSAF", "LH": "LUTE", "LUTE": "LUTE", "FSH": "FSH",
-    "PRL": "PROLACTINA", "PROLACTINA": "PROLACTINA", "TEST": "TESTOSTERONA TOTAL",  "TESTOSTERONA TOTAL": "TESTOSTERONA TOTAL", "TESTOSTERONA LIBRE": "TESTOSTERONA LIBRE",
+    "TSH": "TSH",  "TPO": "APOX",
+    "ACTH": "ACTH", "PH": "PARAT",
+    "RF": "FEB",
+    "ACT": "ANTI-TIROG", "ACTI": "ANTI-TIROG", "TG":  "TIROGLOBULINA", "PTH": "PARAT",
+    "VIH": "HIV",   "PSA": "PSAE", "PSAL": "PSAF",  "LH": "LUTE",   "FSH": "FSH",
+    "PRL": "PROLACTINA", "PROLACTINA": "PROLACTINA", "TEST": "TESTOSTERONA TOTAL", "TESTOSTERONA LIBRE": "TESTOSTERONA LIBRE",
     "HCV": "ACV",   "HVB": "AGHBS", "ACV": "ACV",   "AGHBS": "AGHBS",
-    "IGE": "INMUNOGLOBULINA E", "INMUNOGLOBULINA E": "INMUNOGLOBULINA E", "IGG": "INMUNOGLOBULINA G", "INMUNOGLOBULINA G": "INMUNOGLOBULINA G", "IGA": "INMUNOGLOBULINA A", "INMUNOGLOBULINA A": "INMUNOGLOBULINA A", 
-    "BNP": "PNC", "PNC": "PNC", "AFP": "FETO", "FETO": "FETO",  "CEA": "CEA",
-    "CA19": "CA19", "CA15": "CA15", "CA125": "CA12",
-    "TP":  "TIEMPO DE PROTROMBINA", "TIEMPO DE PROTROMBINA": "TIEMPO DE PROTROMBINA", "TTPA":"TIEMPO DE TROMBOPLASTINA PARCIAL", "TIEMPO DE TROMBOPLASTINA PARCIAL": "TIEMPO DE TROMBOPLASTINA PARCIAL",
-    "CD4": "LINFOCITOS CD4", "CD3": "LINFOCITOS CD3", "LINFOCITOS CD4": "LINFOCITOS CD4","LINFOCITOS CD3": "LINFOCITOS CD3",
-    "C4": "COMPLEMENTO C4", "C3": "COMPLEMENTO C3", "COMPLEMENTO C4": "COMPLEMENTO C4", "COMPLEMENTO C3": "COMPLEMENTO C3",
-    "DHEA":"DEHIDROEPIANDROSTERONA", "DEHIDROEPIANDROSTERONA": "DEHIDROEPIANDROSTERONA",
-    "HE":  "HIERRO SERICO", "HIERRO": "HIERRO SERICO", "HIERRO SERICO": "HIERRO SERICO",
-    "FIJACION DE HIERRO":   "CAPACIDAD TOTAL DE FIJACION DE HIERRO", "CAPACIDAD TOTAL DE FIJACION DE HIERRO": "CAPACIDAD TOTAL DE FIJACION DE HIERRO",
+    "IGE": "INMUNOGLOBULINA E", "IGG": "INMUNOGLOBULINA G", "PCT": "PROCALCITONINA", "IGA": "INMUNOGLOBULINA A", "IGA": "INMUNOGLOBULINA A", 
+    "BNP": "PNC",   "AFP": "FETO",  "CEA": "CEA",
+    "CA19": "CA19", "CA153": "CA15", "CA125": "CA12",
+    "TP":  "TIEMPO DE PROTROMBINA",
+    "TTPA":"TIEMPO DE TROMBOPLASTINA PARCIAL",
+    "CD4":  "LINFOCITOS CD4", "CD3": "LINFOCITOS CD3",
+    "C4": "COMPLEMENTO C4", "C3": "COMPLEMENTO C3",
+    "DHEA":"DEHIDROEPIANDROSTERONA",
+    "HE":  "HIERRO", "HIERRO": "HIERRO SERICO", "HIERRO SERICO": "HIERRO SERICO",
+    "FIJACION DE HIERRO":   "CAPACIDAD TOTAL DE FIJACION DE HIERRO",
     "CAPTACION DE HIERRO":  "CAPACIDAD TOTAL DE FIJACION DE HIERRO",
     "FERR":"FERRITINA", "FERRITINA": "FERRITINA",
     "TRF": "TRANSFERRINA", "TRANSFERRINA": "TRANSFERRINA",
-    "HEMOGLOBINA GLICOSILADA": "HEMOGLOBINA GLICOSILADA", "HBA1A": "HEMOGLOBINA GLICOSILADA", "HEMOGLOBINA GLICOSILADA": "HEMOGLOBINA GLICOSILADA", "HBGL": "HEMOGLOBINA GLICOSILADA", "HBA": "HEMOGLOBINA GLICOSILADA",
+    "HBA1A": "HEMOGLOBINA GLICOSILADA", "HEMOGLOBINA GLICOSILADA": "HEMOGLOBINA GLICOSILADA", "HBGL": "HEMOGLOBINA GLICOSILADA", "HBA": "HEMOGLOBINA GLICOSILADA",
     "BHC": "BHC",  "BH": "BHC",  "BIOMETRIA HEMATICA":"BHC",
-    "EGO": "EXAMEN GENERAL DE ORINA", "EXAMEN GENERAL DE ORINA": "EXAMEN GENERAL DE ORINA",
-    "GLUCOSA": "GLUCOSA", "GLUC":"GLUCOSA", "UREA":"UREA", "CREA":"CREATININA", "CREATININA": "CREATININA", "URIC":"ACIDO URICO", "ACIDO URICO": "ACIDO URICO", "NITROGENO UREICO": "UREA",
-    "CREATINCINASA FRACCION MB": "CKMB", "CREATINFOSFOQUINASA": "CPK", "CK": "CPK", "CKMB": "CKMB", "CPK": "CPK",
-    "GLUP":"GLUPOS", "CTG":"CTG",  "CLUP":"CTG",  "TCLU":"CTG",  "GLUPOS": "GLUPOS",
-    "E2":  "ESTRADIOL", "ESTRADIOL": "ESTRADIOL", "HCG": "HCG", "BGCH":"HCG", "GHC":"HCG", "HGCH":"HCG", "FB":"HCG", "P4":"PROGESTERONA", "PROG":"PROGESTERONA", "PROGESTERONA": "PROGESTERONA",
+    "EGO": "EXAMEN GENERAL DE ORINA",
+    "GLUC":"GLUCOSA", "UREA":"UREA", "CREA":"CREATININA", "URIC":"ACIDO URICO", "NITROGENO UREICO": "UREA", "CREATINCINASA FRACCION MB": "CKMB", "CREATINFOSFOQUINASA": "CPK", "CK": "CPK", "CKMB": "CKMB",
+    "GLUP":"GLUPOS", "CTG":"CTG",
+    "E2":  "ESTRADIOL", "BGCH":"HCG", "GHC":"HCG", "HGCH":"HCG", "FB":"HCG", "P4":"PROGESTERONA", "PROG":"PROGESTERONA",
     "VD3": "VITAMINA D (25 HIDROXICOLECALCIFEROL)",
-    "TOXO IGG":"TOXG",  "TOXO IGM":"TOXM", "TOXG": "TOXG", "TOXM": "TOXM",
-    "RUB IGG": "ACRUB", "RUB IGM": "ACRM", "ACRUB": "ACRUB", "ACRM": "ACRM",
-    "CMVI IGG":"CMV",   "CMVI IGM":"CMVM", "CMV": "CMV", "CMVM": "CMVM",
-    "B12": "VB12", "VB12": "VB12", "PBNP":"PROBNP", "PROBNP": "PROBNP", "INSU":"INSULINA SERICA", "INSULINA SERICA": "INSULINA SERICA",
+    "TOXO IGG":"TOXG",  "TOXO IGM":"TOXM",
+    "RUB IGG": "ACRUB", "RUB IGM": "ACRM",
+    "CMVI IGG":"CMV",   "CMVI IGM":"CMVM",
+    "B12": "VB12",  "PBNP":"PROBNP", "INSU":"INSULINA SERICA",
     "FR":  "FACTOR REUMATOIDE", "FACTOR REUMATOIDE":"FACTOR REUMATOIDE",
-    "K":"POTASIO", "POTASIO": "POTASIO", "NA":"SODIO SERICO", "SODIO SERICO": "SODIO SERICO", "CL":"CLORO", "CLORO": "CLORO", "BUN":"UREA",
-    "MALBO":"MICROALBUMINA EN ORINA",  "MICROALBUMINA EN ORINA":"MICROALBUMINA EN ORINA", "MALBO24":"ALBO", "ALBO": "ALBO",
-    "DEPC24":"DEPU", "DEPU": "DEPU",
-    "MG":"MAGNESIO", "MAGNESIO": "MAGNESIO", "CA":"CALCIO SERICO", "CALCIO SERICO": "CALCIO SERICO", "ALB":"ALBUMINA", "ALBUMINA": "ALBUMINA",
-    "AMY":"AMILASA", "AMILASA": "AMILASA", "PTO":"PROTEINAS TOTALES SERICAS",  "PROTEINAS TOTALES SERICAS": "PROTEINAS TOTALES SERICAS", "PTO24":"PTORINA", "PTORINA": "PTORINA",
-    "COLESTEROL TOTAL":"COLESTEROL", "COLESTEROL": "COLESTEROL",
+    "K":"POTASIO", "NA":"SODIO SERICO", "CL":"CLORO","BUN":"UREA",
+    "MALBO":"MICROALBUMINA EN ORINA", "MICROALBUMINA EN ORINA":"MICROALBUMINA EN ORINA", "MALBO24":"ALBO",
+    "DEPC24":"DEPU",
+    "MG":"MAGNESIO","CA":"CALCIO SERICO","ALB":"ALBUMINA", "ALBO":"MICROALBUMINA EN ORINA",
+    "AMY":"AMILASA", "PTO":"PROTEINAS TOTALES SERICAS", "PROTEINAS TOTALES SERICAS": "PROTEINAS TOTALES SERICAS", "PTO24":"PTORINA",
+    "COLESTEROL TOTAL":"COLESTEROL",
     "ALT":"TGP","AST":"TGO", "TGP": "TGP", "TGO": "TGO", "ASPARTATOAMINOTRANSFERASA (TGO)": "TGO", "ALANINOAMINOTRANSFERASA (TGP)": "TGP", "PROTEINAS TOTALES": "PROTEINAS TOTALES SERICAS",
-    "GGT":"GAMA GLUTAMIL TRANSPEPTIDASA", "GAMA GLUTAMIL TRANSPEPTIDASA": "GAMA GLUTAMIL TRANSPEPTIDASA", "GAMAGLUTAMILTRANSPEPTIDASA": "GAMA GLUTAMIL TRANSPEPTIDASA",
-    "ALP":"FOSFATASA ALCALINA", "FOSFATASA ALCALINA": "FOSFATASA ALCALINA", "CHOL":"COLESTEROL",
-    "HDL":"HDL", "HDL": "HDL", "LDL":"LDL", "COLESTEROL DE ALTA DENSIDAD": "HDL",
-    "LIP":"LIPASA", "LIPASA": "LIPASA", "LDH":"DHL", "DHL": "DHL", "DESHIDROGENASA LACTICA": "DHL", "TOXO":"TOXG", "RUB":"ACRUB", "CMVI":"CMV",
-    "AC FOLICO":"AFOL", "FOLICO":"AFOL", "AFOL": "AFOL",
-    "ANTICUERPOS (IGG) CONTRA HERPES VIRUS 1 Y 2": "H1Y2IGG",  "H1Y2IGG": "H1Y2IGG", "ANTICUERPOS (IGM) CONTRA HERPES VIRUS 1 Y 2": "H1Y2IGM",  "H1Y2IGM":  "H1Y2IGM",
-    "CARGA VIRAL HEPATITIS C": "CVHEPC", "CVHEPC": "CVHEPC", "ANTICUERPOS (IGG) CONTRA COCCIDIOIDES SPP": "AACG", "AACG": "AACG", "ANTICUERPOS (IGM) CONTRA COCCIDIOIDES SPP": "AACM", "AACM": "AACM",
-    "ANTICUERPOS CONTRA MITOCONDRIA": "ACMIT", "ACMIT": "ACMIT", "ANTICUERPOS CONTRA EL  ANTIGENO E DEL VIRUS DE HEPATITIS B (ANTI-HBE)": "AcEHB", "AcEHB": "AcEHB",
-    "ANTICUERPOS CONTRA ANTIGENO DE SUPERFICIE DEL VIRUS DE LA HEPATITIS B (ANTI-HBS)": "AGHBSAGCUANT", "AGHBSAGCUANT": "AGHBSAGCUANT",
-    "SUBCLASES DE IGG (1,2,3,4)": "IGGS", "IGGS": "IGGS", "IGM": "INMUNOGLOBULINA M", "INMUNOGLOBULINA IGM":"INMUNOGLOBULINA M", "INMUNOGLOBULINA M":"INMUNOGLOBULINA M",
-    "ANTIGENO HELICOBACTER PYLORI EN HECES": "AGHPH", "AGHPH": "AGHPH",
-    "ACVA":"VAL", "VAL": "VAL", "P":"FOSFORO", "FOSFORO": "FOSFORO", "PT": "PROTEINAS TOTALES SERICAS", "ANTICUERPOS (IGM) CONTRA CHLAMYDIA TRACHOMATIS": "ACTM", "ACTM": "ACTM",
-    "BILID":  "BILIRRUBINA DIRECTA", "BILIT":  "BILIRRUBINA TOTAL", "BILIRRUBINAS": "BILIRRUBINA DIRECTA", "IDENTIFICACION DE ANTIGENOS DE VIH-1 (WESTERN BLOT)": "WBVIH", "WBVIH": "WBVIH",
-    "BILI":  "BILIRRUBINA DIRECTA", "ANTICUERPOS CONTRA PEPTIDO CICLICO CITRULINADO": "CCP", "CCP": "CCP", "APCC": "CCP", "ANTIGENO 27 DEL HLA": "HLAB27",  "HLAB27": "HLAB27",
+    "GGT":"GAMA GLUTAMIL TRANSPEPTIDASA", "CLUP":"CTG", "GAMA GLUTAMIL TRANSPEPTIDASA": "GAMA GLUTAMIL TRANSPEPTIDASA",
+    "ALP":"FOSFATASA ALCALINA","GLUP":"GLUPOS", "FOSFATASA ALCALINA": "FOSFATASA ALCALINA",
+    "UREA":"UREA", "CREA":"CREATININA", "CHOL":"COLESTEROL",
+    "HDL":"HDL", "LDL":"LDL", "TCLU":"CTG",
+    "LIP":"LIPASA", "LDH":"DHL", "DESHIDROGENASA LACTICA": "DHL", "TOXO":"TOXG", "RUB":"ACRUB", "CMVI":"CMV",
+    "AC FOLICO":"AFOL", "FOLICO":"AFOL",
+    "ANTICUERPOS (IGG) CONTRA HERPES VIRUS 1 Y 2": "H1Y2IGG", "ANTICUERPOS (IGM) CONTRA HERPES VIRUS 1 Y 2": "H1Y2IGM",
+    "CARGA VIRAL HEPATITIS C": "CVHEPC", "ANTICUERPOS (IGG) CONTRA COCCIDIOIDES SPP": "AACG", "ANTICUERPOS (IGM) CONTRA COCCIDIOIDES SPP": "AACM",
+    "ANTICUERPOS CONTRA MITOCONDRIA": "ACMIT", "ANTICUERPOS CONTRA EL  ANTIGENO E DEL VIRUS DE HEPATITIS B (ANTI-HBE)": "AcEHB",
+    "ANTICUERPOS CONTRA ANTIGENO DE SUPERFICIE DEL VIRUS DE LA HEPATITIS B (ANTI-HBS)": "AGHBSAGCUANT",
+    "SUBCLASES DE IGG (1,2,3,4)": "IGGS", 
+    "INMUNOGLOBULINA IGM":"INMUNOGLOBULINA M", "INMUNOGLOBULINA M":"INMUNOGLOBULINA M", "ANTIGENO HELICOBACTER PYLORI EN HECES": "AGHPH",
+    "ACVA":"VAL", "P":"FOSFORO", "PT": "PROTEINAS TOTALES SERICAS", "ANTICUERPOS (IGM) CONTRA CHLAMYDIA TRACHOMATIS": "ACTM",
+    "BILID":  "BILIRRUBINA DIRECTA", "BILIT":  "BILIRRUBINA TOTAL", "BILIRRUBINAS": "BILIRRUBINA DIRECTA", "IDENTIFICACION DE ANTIGENOS DE VIH-1 (WESTERN BLOT)": "WBVIH",
+    "BILI":  "BILIRRUBINA DIRECTA", "ANTICUERPOS CONTRA PEPTIDO CICLICO CITRULINADO": "CCP", "APCC": "CCP", "ANTIGENO 27 DEL HLA": "HLAB27", 
     "BILIRRUBINA DIRECTA": "BILIRRUBINA DIRECTA", "BILIRRUBINA TOTAL": "BILIRRUBINA TOTAL", "ALBUMINA": "ALBUMINA",
     "AU": "ACIDO URICO", "ACIDO URICO": "ACIDO URICO", "RESISTENCIA A LA PROTEINA C ACTIVADA": "RESISTENCIA A PROTEINA C ACTIVADA",
     "FACTOR XII": "FACTOR XII", "FACTOR DE VON WILLEBRAND": "FVW", "FVW": "FVW", "ANTICOAGULANTE LUPICO": "ANTICOAGULANTE LUPICO",
-    "TROP": "TROPONINA I", "TROPONINA I": "TROPONINA I", "ANA": "ANAIFI", "ANAIFI": "ANAIFI", "IGF": "ANAIFI", "DNA": "DNA", "SMITH": "SMITH", "RISTOCETINA": "RISTOCETINA",
-    "FACTOR VII": "FACTOR VII DE LA COAGULACION", "FACTOR VII DE LA COAGULACION": "FACTOR VII DE LA COAGULACION", "PROTEINA C COAGULANTE": "PROTC", "PROTC": "PROTC", "PROTEINA S DE LA COAGULACION": "PROTS",
-    "FACTOR VIII": "FVIII", "ANTITROMBINA": "AT3", "AT3": "AT3", "ANTITROMBINA III": "AT3", "FACTOR XII": "FACTOR XII", "FACTOR IX": "FACTOR IX",
-    "CORTISOL": "CORTISOL SERICO", "CORTISOL SERICO": "CORTISOL SERICO", "AcHepA": "AcHepA", "ANTICUERPOS IGM CONTRA VIRUS DE LA HEPATITIS A": "AcHepA", "ELASTASA FECAL": "ELASPAN", "ELASPAN": "ELASPAN",
-    "DIMERO": "DIMERO", "115 DD": "DIMERO", "PEPTIDO C": "PEPC", "PEPC": "PEPC", "PEPTIDO C": "PEPC", "PEPTIDO C": "PEPTIDO C", "ANTIESTREPTOLISINA O":"AELO", "AELO": "AELO",  
-    "VDRL": "VDRL", "IGG": "INMUNOGLOBULINA G IgG", "INMUNOGLOBULINA G IgG": "INMUNOGLOBULINA G IgG", "HCA":"HORMONA DEL CRECIMIENTO", "HORMONA DEL CRECIMIENTO": "HORMONA DEL CRECIMIENTO", 
-    "CAL24":"CAU4", "CALCIO EN ORINA 24 HORAS":"CAU4",  "CAU4": "CAU4",
-    "ACAN": "SSA", "SSA": "SSA", "ACAS": "SMITH", "SMITH": "SMITH", "MPO": "MIELO", "MIELO": "MIELO", "ACAP": "ANTICUERPOS ANTI-CITOPLASMA C-ANCA", "ANTICUERPOS ANTI-CITOPLASMA C-ANCA": "ANTICUERPOS ANTI-CITOPLASMA C-ANCA", 
-    "ACAV": "VAL", "VD25": "HIDROXICOLECALCIFEROL", "VD": "HIDROXICOLECALCIFEROL", "HIDROXICOLECALCIFEROL": "HIDROXICOLECALCIFEROL",
+    "TROP": "TROPONINA I", "ANA": "ANAIFI", "IGF": "ANAIFI", "DNA": "DNA", "SMITH": "SMITH", "RISTOCETINA": "RISTOCETINA",
+    "FACTOR VII": "FACTOR VII DE LA COAGULACION", "PROTEINA C COAGULANTE": "PROTC", "PROTEINA S DE LA COAGULACION": "PROTS",
+    "FACTOR VIII": "FVIII", "ANTITROMBINA": "AT3", "ANTITROMBINA III": "AT3", "FACTOR XII": "FACTOR XII", "FACTOR IX": "FACTOR IX",
+    "CORTISOL": "CORTISOL SERICO", "AcHepA": "AcHepA", "ANTICUERPOS IGM CONTRA VIRUS DE LA HEPATITIS A": "AcHepA", "ELASTASA FECAL": "ELASPAN",
+    "CALCIO": "CALCIO", "MAGNESIO": "MAGNESIO", "SODIO SERICO": "SODIO SERICO", "POTASIO": "POTASIO",
+    "COLESTEROL DE ALTA DENSIDAD": "HDL", "GAMAGLUTAMILTRANSPEPTIDASA": "GAMA GLUTAMIL TRANSPEPTIDASA",
+    "DIMERO": "DIMERO", "115 DD": "DIMERO", "PEPTIDO C": "PEPC", "PEPTIDO C": "PEPC", "PEPTIDO C": "PEPTIDO C", "ANTIESTREPTOLISINA O":"AELO", "AELO": "AELO",  
+    "VDRL": "VDRL", "IGG": "INMUNOGLOBULINA G IgG", "INMUNOGLOBULINA G IgG": "INMUNOGLOBULINA G IgG", "HCA":"HORMONA DEL CRECIMIENTO", "CAL24":"CAU4", "CALCIO EN ORINA 24 HORAS":"CAU4", 
+    "ACAN": "SSA", "ACAS": "SMITH", "MPO": "MIELO", "ACAP": "ANTICUERPOS ANTI-CITOPLASMA C-ANCA", "ACAV": "VAL", "VD25": "HIDROXICOLECALCIFEROL", "VD": "HIDROXICOLECALCIFEROL",
 }
 
 # ── v4.2: EXPANSIONES — un término → lista de estudios reales ─────────────────
@@ -900,7 +699,7 @@ EXPANSIONES: dict[str, list[str]] = {
     ],
 
     # Panel viral completo
-    "VIRAL": [
+    "PANEL VIRAL": [
         "HIV",      # VIH
         "ACV",      # Hepatitis C
         "AGHBS",    # Hepatitis B (AgHBs)
@@ -908,14 +707,6 @@ EXPANSIONES: dict[str, list[str]] = {
 
     # Perfil tiroideo completo
     "PERFIL TIROIDEO": [
-        "T3T",
-        "T4T",
-        "T3L",
-        "T4L",
-        "TSH",
-    ],
-
-    "TIROIDEOS": [
         "T3T",
         "T4T",
         "T3L",
@@ -977,11 +768,7 @@ TIROIDEOS_EXACTOS = {"T3T", "T4T", "T3L", "T4L", "TSH", }
 # Para agregar un caso nuevo: anota el orden exacto en que aparecen las
 # opciones en el portal para ese estudio, y agrega una línea aquí.
 SELECCION_MANUAL_ESTUDIOS = {
-    "PROG": 2,
-    "P4": 2,
-    "PROGESTERONA": 2,   # opciones: 1) HIDROXIPROGESTERONA  2) PROGESTERONA <- esta
-    "IMUNOGLOBULINA IGG": 2,
-    "IGG": 2
+    "PROGESTERONA": 2   # opciones: 1) HIDROXIPROGESTERONA  2) PROGESTERONA <- esta
 }
 
 def normalizar_estudio(est: str) -> str:
@@ -1211,7 +998,7 @@ def llamar_claude(prompt, ruta):
         ]
 
     msg = client.messages.create(
-        model=ANTHROPIC_MODEL, max_tokens=16384,
+        model=ANTHROPIC_MODEL, max_tokens=4096,
         messages=[{"role":"user","content":content}],
     )
     raw = msg.content[0].text.strip()
@@ -1235,26 +1022,22 @@ def extraer_pacientes(ruta, log_fn):
 
     log_fn("  Pasada 1/2 — pacientes...")
     base = {"pacientes": []}
-    for i in range(5):
+    for i in range(3):
         try:
             base = llamar_claude(p_base, ruta)
             if base.get("pacientes"): break
         except Exception as e:
-            espera = 3 if "500" in str(e) or "server" in str(e).lower() else 1
-            log_fn(f"  Intento {i+1}: {e}")
-            if i < 4: time.sleep(espera * (i + 1))
+            log_fn(f"  Intento {i+1}: {e}"); time.sleep(1)
     log_fn(f"  Pacientes encontrados: {len(base.get('pacientes', []))}")
 
     log_fn("  Pasada 2/2 — estudios...")
     completo = {"pacientes": []}
-    for i in range(5):
+    for i in range(3):
         try:
             completo = llamar_claude(p_completo, ruta)
             if completo.get("pacientes"): break
         except Exception as e:
-            espera = 3 if "500" in str(e) or "server" in str(e).lower() else 1
-            log_fn(f"  Intento {i+1}: {e}")
-            if i < 4: time.sleep(espera * (i + 1))
+            log_fn(f"  Intento {i+1}: {e}"); time.sleep(1)
 
     dic = {normalizar_numero(p["numero"]): p for p in completo.get("pacientes", [])}
     total_estudios = sum(len(v.get("estudios", [])) for v in dic.values())
@@ -1929,13 +1712,18 @@ class ValidacionWindow:
 # ══════════════════════════════════════════════════════════════════════════════
 class SetupWindow:
     """
-    Asistente de primer arranque: pide la API key de Anthropic y la guarda en
-    config.json (junto al ejecutable). El usuario y contraseña del portal del
-    laboratorio (Toronja) se piden cada vez en la pantalla de acceso.
+    Asistente de primer arranque: pide la API key de Anthropic, las credenciales
+    del portal del laboratorio y el usuario interno de la app, y los guarda en
+    config.json (junto al ejecutable). Permite repartir la app sin compartir
+    credenciales — cada instalación configura las suyas la primera vez.
     """
 
     CAMPOS = [
-        ("api_key", "API key de Anthropic (Claude)", False),
+        ("api_key",    "API key de Anthropic (Claude)",         False),
+        ("lab_user",   "Usuario del portal del laboratorio",    False),
+        ("lab_pass",   "Contraseña del portal del laboratorio", True),
+        ("admin_user", "Usuario interno de la app",             False),
+        ("admin_pass", "Contraseña interna de la app",          True),
     ]
 
     def __init__(self):
@@ -1946,8 +1734,13 @@ class SetupWindow:
             self._build_tk()
 
     def _valores_iniciales(self):
+        primer_usuario = next(iter(USUARIOS), "admin")
         return {
-            "api_key": obtener_api_key(),
+            "api_key":    obtener_api_key(),
+            "lab_user":   LAB_USER,
+            "lab_pass":   LAB_PASS,
+            "admin_user": primer_usuario,
+            "admin_pass": USUARIOS.get(primer_usuario, ""),
         }
 
     # ── CTk ───────────────────────────────────────────────────────────────────
@@ -2049,14 +1842,25 @@ class SetupWindow:
 
     def _guardar(self):
         valores = {clave: self.entradas[clave].get().strip() for clave, _, _ in self.CAMPOS}
-        if not valores["api_key"]:
-            self._mostrar_error("Completa: API key de Anthropic (Claude)")
+        requeridos = [etiqueta for clave, etiqueta, _ in self.CAMPOS[:3] if not valores[clave]]
+        if requeridos:
+            self._mostrar_error("Completa: " + ", ".join(requeridos))
             return
+        admin_user = valores["admin_user"] or "admin"
+        admin_pass = valores["admin_pass"] or "admin123"
 
-        guardar_config({"anthropic_api_key": valores["api_key"]})
+        guardar_config({
+            "anthropic_api_key": valores["api_key"],
+            "lab_user":          valores["lab_user"],
+            "lab_pass":          valores["lab_pass"],
+            "usuarios":          {admin_user: admin_pass},
+        })
 
-        global ANTHROPIC_API_KEY
+        global ANTHROPIC_API_KEY, LAB_USER, LAB_PASS, USUARIOS
         ANTHROPIC_API_KEY = valores["api_key"]
+        LAB_USER          = valores["lab_user"]
+        LAB_PASS          = valores["lab_pass"]
+        USUARIOS          = {admin_user: admin_pass}
 
         self.root.destroy()
         LoginWindow().run()
@@ -2141,7 +1945,7 @@ class LoginWindow:
         ctk.CTkLabel(card, text="Iniciar sesión",
                      font=ctk.CTkFont(family=FONT_UI, size=14, weight="bold"),
                      text_color=COLORS["text"]).pack(anchor="w", padx=36, pady=(24, 4))
-        ctk.CTkLabel(card, text="Usa tu usuario y contraseña del sistema del laboratorio (Toronja)",
+        ctk.CTkLabel(card, text="Ingresa tus credenciales para continuar",
                      font=ctk.CTkFont(family=FONT_UI, size=10),
                      text_color=COLORS["text_muted"]).pack(anchor="w", padx=36, pady=(0, 20))
 
@@ -2161,8 +1965,6 @@ class LoginWindow:
             corner_radius=8,
         )
         self.usr.pack(padx=36, pady=(6, 16))
-        if LAB_USER:
-            self.usr.insert(0, LAB_USER)
         self.usr.focus()
 
         # ── Campo Contraseña ──────────────────────────────────────────────
@@ -2205,7 +2007,7 @@ class LoginWindow:
         ).pack(padx=36, pady=(0, 36))
 
         # ── Versión ───────────────────────────────────────────────────────
-        ctk.CTkLabel(root, text=f"FluxLab v{APP_VERSION}  ·  Diazlab",
+        ctk.CTkLabel(root, text="FluxLab v4.2  ·  Diazlab",
                      font=ctk.CTkFont(family=FONT_UI, size=8),
                      text_color=COLORS["text_faint"]).place(relx=0.5, rely=0.97, anchor="center")
 
@@ -2240,10 +2042,7 @@ class LoginWindow:
         self.usr = tk.Entry(f, width=28, bg=COLORS["bg_input"], fg=COLORS["text"],
                             insertbackground=COLORS["blue"], relief="flat",
                             font=(FONT_UI, 11))
-        self.usr.pack(fill="x", pady=(4, 12), ipady=7)
-        if LAB_USER:
-            self.usr.insert(0, LAB_USER)
-        self.usr.focus()
+        self.usr.pack(fill="x", pady=(4, 12), ipady=7); self.usr.focus()
         tk.Label(f, text="Contrasena", bg=COLORS["bg_surface"], fg=COLORS["text_muted"],
                  font=(FONT_UI, 9, "bold")).pack(anchor="w")
         self.pwd = tk.Entry(f, width=28, show="*", bg=COLORS["bg_input"], fg=COLORS["text"],
@@ -2264,29 +2063,16 @@ class LoginWindow:
     def _login(self):
         u = self.usr.get().strip()
         p = self.pwd.get().strip()
-
-        if not u or not p:
-            msg = "Ingresa tu usuario y contraseña del laboratorio"
-        elif USUARIOS.get(u) != p:
-            msg = "Usuario o contraseña incorrectos"
+        if USUARIOS.get(u) == p:
+            self.root.destroy()
+            MainApp(u).run()
         else:
-            msg = ""
-
-        if msg:
             if CTK_AVAILABLE:
-                self.error_lbl.configure(text=msg)
+                self.error_lbl.configure(text="Usuario o contraseña incorrectos")
+                self.pwd.delete(0, tk.END)
             else:
-                self.error_lbl.config(text=msg)
-            self.pwd.delete(0, tk.END)
-            return
-
-        global LAB_USER, LAB_PASS
-        LAB_USER = u
-        LAB_PASS = p
-        guardar_config({"lab_user": u, "lab_pass": p})
-
-        self.root.destroy()
-        MainApp(u).run()
+                self.error_lbl.config(text="Usuario o contraseña incorrectos")
+                self.pwd.delete(0, tk.END)
 
     def run(self):
         self.root.mainloop()
@@ -2336,10 +2122,10 @@ class MainApp:
         actualizacion = buscar_actualizacion()
         if not actualizacion:
             return
-        version_nueva, url_descarga, tamano_esperado = actualizacion
-        self._en_ui(self._ofrecer_actualizacion, version_nueva, url_descarga, tamano_esperado)
+        version_nueva, url_descarga = actualizacion
+        self._en_ui(self._ofrecer_actualizacion, version_nueva, url_descarga)
 
-    def _ofrecer_actualizacion(self, version_nueva: str, url_descarga: str, tamano_esperado: int = 0):
+    def _ofrecer_actualizacion(self, version_nueva: str, url_descarga: str):
         if not messagebox.askyesno(
             "Actualización disponible",
             f"Hay una nueva versión de {APP_NAME} disponible: {version_nueva}\n"
@@ -2352,22 +2138,17 @@ class MainApp:
         self._log(f"\nDescargando actualización {version_nueva}...")
         threading.Thread(
             target=self._descargar_e_instalar_actualizacion,
-            args=(version_nueva, url_descarga, tamano_esperado), daemon=True).start()
+            args=(version_nueva, url_descarga), daemon=True).start()
 
-    def _descargar_e_instalar_actualizacion(self, version_nueva: str, url_descarga: str, tamano_esperado: int = 0):
-        self._log("  (La app sigue funcionando con normalidad durante la descarga)")
-        ok = preparar_actualizacion(
-            url_descarga, version_nueva,
-            tamano_esperado=tamano_esperado, log_fn=self._log)
-        if ok:
-            self._log("Actualización lista — la app se cerrará y se reabrirá sola ya actualizada.")
+    def _descargar_e_instalar_actualizacion(self, version_nueva: str, url_descarga: str):
+        if preparar_actualizacion(url_descarga, version_nueva, log_fn=self._log):
+            self._log("Actualización descargada — reiniciando para terminar de instalarla...")
             self._en_ui(self._reiniciar_para_actualizar)
         else:
             self._en_ui(lambda: messagebox.showwarning(
-                "Actualización fallida",
-                f"No se pudo instalar la versión {version_nueva}.\n\n"
-                "Revisa el log para ver el detalle del error.\n"
-                "Se seguirá usando la versión actual sin interrupción.",
+                "Actualización",
+                "No se pudo descargar o preparar la actualización. "
+                "Se seguirá usando la versión actual.",
                 parent=self.root))
 
     def _reiniciar_para_actualizar(self):
@@ -2381,7 +2162,7 @@ class MainApp:
     # ─────────────────────────────────────────────────────────────────────────
     def _build_ctk(self):
         self.root = ctk.CTk()
-        self.root.title(f"{APP_NAME} — Diazlab v{APP_VERSION}")
+        self.root.title(f"{APP_NAME} — Diazlab v4.2")
         self.root.configure(fg_color=COLORS["bg"])
         maximizar_ventana(self.root)
         self.root.update_idletasks()
@@ -2418,17 +2199,14 @@ class MainApp:
                      font=ctk.CTkFont(family=FONT_UI, size=17, weight="bold"),
                      text_color=COLORS["text"]).pack(side="left")
 
-        # Chip usuario (clic → menú con "Cerrar sesión")
+        # Chip usuario
         chip = ctk.CTkFrame(topbar, fg_color=COLORS["bg_surface"],
                             corner_radius=20, border_width=1,
-                            border_color=COLORS["border"], cursor="hand2")
+                            border_color=COLORS["border"])
         chip.pack(side="right", padx=22, pady=12)
-        chip_lbl = ctk.CTkLabel(chip, text=f"  {self.usuario}  ▾",
+        ctk.CTkLabel(chip, text=f"  {self.usuario}  ",
                      font=ctk.CTkFont(family=FONT_UI, size=9, weight="bold"),
-                     text_color=COLORS["text_muted"], cursor="hand2")
-        chip_lbl.pack(padx=6, pady=4)
-        chip.bind("<Button-1>", self._mostrar_menu_usuario)
-        chip_lbl.bind("<Button-1>", self._mostrar_menu_usuario)
+                     text_color=COLORS["text_muted"]).pack(padx=6, pady=4)
 
         # ══ BODY (sidebar + content) ═════════════════════════════════════
         body = ctk.CTkFrame(root, fg_color=COLORS["bg"], corner_radius=0)
@@ -2589,7 +2367,7 @@ class MainApp:
         self.log_text.pack(fill="both", expand=True)
 
         # ── Mensajes iniciales ────────────────────────────────────────────
-        self._log(f"Sistema listo v{APP_VERSION} — bots paralelos + estudios generales por lista")
+        self._log("Sistema listo v4.2 — bots paralelos + estudios generales por lista")
         self._log("Flujo: Cargar > Editar (agregar estudios generales si aplica) > Iniciar bots")
         self._log("Sexo: M=Masculino vacío=Femenino | Edad: número o 0 | F.Nac: DD/MM/AAAA")
 
@@ -2628,7 +2406,7 @@ class MainApp:
     # ─────────────────────────────────────────────────────────────────────────
     def _build_tk_legacy(self):
         self.root = tk.Tk()
-        self.root.title(f"{APP_NAME} - Diazlab v{APP_VERSION}")
+        self.root.title(f"{APP_NAME} - Diazlab v4.2")
         self.root.geometry("1160x760")
         self.root.configure(bg=COLORS["bg"])
         maximizar_ventana(self.root)
@@ -2651,15 +2429,11 @@ class MainApp:
         tk.Label(brand_text, text=APP_SUBTITLE, bg=COLORS["bg"], fg=COLORS["text_muted"],
                  font=(FONT_UI, 10)).pack(anchor="w")
 
-        user_chip = tk.Frame(hdr, bg=COLORS["bg_surface"], bd=1, relief="solid",
-                             cursor="hand2")
+        user_chip = tk.Frame(hdr, bg=COLORS["bg_surface"], bd=1, relief="solid")
         user_chip.pack(side="right", pady=18)
-        user_lbl = tk.Label(user_chip, text=f"Usuario: {self.usuario}  ▾", bg=COLORS["bg_surface"],
+        tk.Label(user_chip, text=f"Usuario: {self.usuario}", bg=COLORS["bg_surface"],
                  fg=COLORS["text_muted"], font=(FONT_UI, 9, "bold"),
-                 padx=14, pady=8, cursor="hand2")
-        user_lbl.pack()
-        user_chip.bind("<Button-1>", self._mostrar_menu_usuario)
-        user_lbl.bind("<Button-1>", self._mostrar_menu_usuario)
+                 padx=14, pady=8).pack()
 
         body = tk.Frame(self.root, bg=COLORS["bg"])
         body.pack(fill="both", expand=True, padx=22, pady=(4, 22))
@@ -2744,7 +2518,7 @@ class MainApp:
         sb2.pack(side="right", fill="y")
         self.log_text.pack(fill="both", expand=True)
 
-        self._log(f"Sistema listo v{APP_VERSION} — bots paralelos + estudios generales por lista")
+        self._log("Sistema listo v4.2 — bots paralelos + estudios generales por lista")
         self._log("Flujo: Cargar > Editar (agregar estudios generales si aplica) > Iniciar bots")
         self._log("Sexo: M=Masculino vacío=Femenino | Edad: número o 0 | F.Nac: DD/MM/AAAA")
         self._actualizar_pac_hoy()
@@ -2755,46 +2529,6 @@ class MainApp:
                          activeforeground=fg, font=(FONT_UI, 9, "bold"),
                          relief="flat", cursor="hand2", padx=14, pady=9,
                          bd=0, highlightthickness=0)
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # MENÚ USUARIO / CERRAR SESIÓN
-    # ─────────────────────────────────────────────────────────────────────────
-    def _mostrar_menu_usuario(self, event=None):
-        menu = tk.Menu(self.root, tearoff=0,
-                       bg=COLORS["bg_surface"], fg=COLORS["text"],
-                       activebackground=COLORS["red_soft"],
-                       activeforeground=COLORS["red"],
-                       font=(FONT_UI, 9))
-        menu.add_command(label="Cerrar sesión", command=self._cerrar_sesion)
-        if event is not None:
-            x = event.widget.winfo_rootx()
-            y = event.widget.winfo_rooty() + event.widget.winfo_height()
-        else:
-            x = self.root.winfo_pointerx()
-            y = self.root.winfo_pointery()
-        menu.tk_popup(x, y)
-
-    def _cerrar_sesion(self):
-        with self.bots_lock:
-            bots_corriendo = any(t.is_alive() for t in self.bots_activos.values())
-        with self.etiquetas_lock:
-            etiquetas_corriendo = any(t.is_alive() for t in self.etiquetas_activos.values())
-
-        avisos = []
-        if self.cola:
-            avisos.append("Hay listas en la cola para ingresar.")
-        if bots_corriendo or etiquetas_corriendo:
-            avisos.append("Hay un bot en funcionamiento.")
-
-        if avisos and not messagebox.askyesno(
-            "Cerrar sesión",
-            "\n".join(avisos) + "\n\n¿Seguro que quieres salir?",
-            icon="warning", parent=self.root,
-        ):
-            return
-
-        self.root.destroy()
-        LoginWindow().run()
 
     # ─────────────────────────────────────────────────────────────────────────
     # HELPERS INTERNOS — SIN CAMBIOS DE LÓGICA
@@ -3234,8 +2968,7 @@ class MainApp:
 
             # NUEVA REGLA
             # Si solo existe una opción, seleccionarla SIEMPRE
-            # (excepto en busqueda exacta de paciente: debe coincidir 100%)
-            if count == 1 and not exacto:
+            if count == 1:
                 texto = items.first.inner_text().strip()
                 L(f"  Unica opcion encontrada: {texto}")
                 items.first.click()
@@ -3362,23 +3095,23 @@ class MainApp:
             if not nombre:
                 return False
 
-            # 1) Buscar tal cual esta escrito en la lista
             escribir(page, "#nuevo_cliente", nombre, delay=85)
             if autocomplete(page, nombre, t=12000, exacto=True):
                 return True
 
-            # 2) Buscar con punto final (variante ya registrada en el sistema)
-            nombre_pto = nombre_con_punto(nombre)
-            escribir(page, "#nuevo_cliente", nombre_pto, delay=85)
-            if autocomplete(page, nombre_pto, t=12000, exacto=True):
+            estado = crear_paciente(page, pac)
+            time.sleep(1)
+            escribir(page, "#nuevo_cliente", nombre, delay=85)
+            if autocomplete(page, nombre, t=14000, exacto=True):
                 return True
 
-            # 3) No existe -> crear paciente nuevo, siempre con punto final
+            nombre_pto = nombre_con_punto(nombre)
             pac_pto = pac.copy()
             pac_pto["nombre"] = nombre_pto
-            L(f"{tag}No existe '{nombre}' ni '{nombre_pto}'; creare paciente nuevo: {nombre_pto}")
-            crear_paciente(page, pac_pto)
-            time.sleep(1)
+            L(f"{tag}No aparece exacto; intentare crear/buscar con punto final: {nombre_pto}")
+            if estado != "creado":
+                crear_paciente(page, pac_pto)
+                time.sleep(1)
             escribir(page, "#nuevo_cliente", nombre_pto, delay=85)
             if autocomplete(page, nombre_pto, t=14000, exacto=True):
                 return True
@@ -3726,8 +3459,7 @@ class MainApp:
 
             # NUEVA REGLA
             # Si solo existe una opción, seleccionarla SIEMPRE
-            # (excepto en busqueda exacta de paciente: debe coincidir 100%)
-            if count == 1 and not exacto:
+            if count == 1:
                 texto = items.first.inner_text().strip()
                 L(f"  Unica opcion encontrada: {texto}")
                 items.first.click()
@@ -3854,23 +3586,23 @@ class MainApp:
             if not nombre:
                 return False
 
-            # 1) Buscar tal cual esta escrito en la lista
             escribir(page, "#nuevo_cliente", nombre, delay=85)
             if autocomplete(page, nombre, t=12000, exacto=True):
                 return True
 
-            # 2) Buscar con punto final (variante ya registrada en el sistema)
-            nombre_pto = nombre_con_punto(nombre)
-            escribir(page, "#nuevo_cliente", nombre_pto, delay=85)
-            if autocomplete(page, nombre_pto, t=12000, exacto=True):
+            estado = crear_paciente(page, pac)
+            time.sleep(1)
+            escribir(page, "#nuevo_cliente", nombre, delay=85)
+            if autocomplete(page, nombre, t=14000, exacto=True):
                 return True
 
-            # 3) No existe -> crear paciente nuevo, siempre con punto final
+            nombre_pto = nombre_con_punto(nombre)
             pac_pto = pac.copy()
             pac_pto["nombre"] = nombre_pto
-            L(f"  No existe '{nombre}' ni '{nombre_pto}'; creare paciente nuevo: {nombre_pto}")
-            crear_paciente(page, pac_pto)
-            time.sleep(1)
+            L(f"  No aparece exacto; intentare crear/buscar con punto final: {nombre_pto}")
+            if estado != "creado":
+                crear_paciente(page, pac_pto)
+                time.sleep(1)
             escribir(page, "#nuevo_cliente", nombre_pto, delay=85)
             if autocomplete(page, nombre_pto, t=14000, exacto=True):
                 return True
@@ -4036,7 +3768,7 @@ class MainApp:
     def _encolar_etiquetas(self, hoja_historial: dict):
         """
         Lanza el bot de etiquetas para esta lista/grupo, a pedido manual
-        (boton "Sacar etiquetas"). Agrupa todas las hojas del mismo MU/OB/NOG/GYM
+        (boton "Sacar etiquetas"). Agrupa todas las hojas del mismo MU/OB
         (ver _items_historial_grupo / _preparar_grupo_etiquetas) en un solo PDF.
         Ya no se lanza automaticamente al terminar de ingresar una hoja —
         eso saturaba la PC con un segundo navegador en paralelo mientras el
@@ -4142,7 +3874,7 @@ class MainApp:
             return f"{m.group(1).upper()}-{m.group(2)}" if m else ""
 
         mu_lista = extraer_mu(obs_lista)
-        L(f"  Observacion lista: '{obs_lista}' -> MU/OB/NOG/GYM: '{mu_lista}'")
+        L(f"  Observacion lista: '{obs_lista}' -> MU/OB: '{mu_lista}'")
 
         ts_fin = meta.get("timestamp_fin","")
         fecha_ingreso = ts_fin[:10] if ts_fin and len(ts_fin) >= 10 else datetime.now().strftime("%Y-%m-%d")
@@ -4277,8 +4009,8 @@ class MainApp:
                                 continue
                         mu_web = extraer_mu(obs_web)
                         L(f"    Nombre web : {nombre_web}")
-                        L(f"    Obs web    : '{obs_web}' -> MU/OB/NOG/GYM: '{mu_web}'")
-                        L(f"    MU/OB/NOG/GYM lista: '{mu_lista}'")
+                        L(f"    Obs web    : '{obs_web}' -> MU/OB: '{mu_web}'")
+                        L(f"    MU/OB lista: '{mu_lista}'")
                         if mu_lista and mu_web:
                             coincide = mu_coincide(mu_lista, mu_web)
                         elif not mu_lista and not obs_lista:
@@ -4286,7 +4018,7 @@ class MainApp:
                         else:
                             coincide = (obs_lista in obs_web) or (obs_web in obs_lista) if obs_web else False
                         if coincide:
-                            L(f"    [OK] MU/OB/NOG/GYM coincide -> marcando checkbox")
+                            L(f"    [OK] MU/OB coincide -> marcando checkbox")
                             try:
                                 cb = page.locator(f"tr#{row_id} input.checkbox_lotes_edt").first
                                 if cb.count() == 0:
@@ -4301,7 +4033,7 @@ class MainApp:
                             except Exception as e:
                                 L(f"    Error marcando checkbox: {e}")
                         else:
-                            L(f"    [x] MU/OB/NOG/GYM no coincide ({mu_web} != {mu_lista}), probando siguiente candidato...")
+                            L(f"    [x] MU/OB no coincide ({mu_web} != {mu_lista}), probando siguiente candidato...")
                     if encontrado: break
                     try:
                         btn_next = page.locator(
@@ -4583,17 +4315,17 @@ class MainApp:
 
             mu_web   = extraer_mu(obs_web)
             mu_lista = mu_esperado or extraer_mu(obs_lista)
-            L(f"    MU/OB/NOG/GYM web: '{mu_web}'  |  MU/OB/NOG/GYM lista: '{mu_lista}'")
+            L(f"    MU/OB web: '{mu_web}'  |  MU/OB lista: '{mu_lista}'")
 
             if mu_lista and not mu_web:
-                L(f"    [x] No pude confirmar MU/OB/NOG/GYM en la solicitud web -> descarto este candidato")
+                L(f"    [x] No pude confirmar MU/OB en la solicitud web -> descarto este candidato")
                 return False
 
             if not observacion_coincide(obs_lista, obs_web, mu_lista):
-                L(f"    [x] Observacion/MU-OB-NOG-GYM NO coincide -> descarto este candidato")
+                L(f"    [x] Observacion/MU-OB NO coincide -> descarto este candidato")
                 return False
 
-            L(f"    [OK] Verificacion OK (nombre + control + MU/OB/NOG/GYM/obs) -> marcando")
+            L(f"    [OK] Verificacion OK (nombre + control + MU/OB/obs) -> marcando")
             try:
                 cb = fila.locator("input.checkbox_lotes_edt, input[type='checkbox']").first
                 if not cb.count():
@@ -4794,12 +4526,12 @@ class MainApp:
             L(f"  Fecha filtro: {fecha_ingreso}")
             L(f"  Doctor: {doctor_texto or '(sin filtro)'}")
             L(f"  Observacion lista: {obs_lista or '(vacia)'}")
-            L(f"  MU/OB/NOG/GYM esperado desde historial: {mu_esperado or '(ninguno)'}")
+            L(f"  MU/OB esperado desde historial: {mu_esperado or '(ninguno)'}")
             if grupo_items:
                 L(f"  Hojas agrupadas: {len(grupo_items)}")
             L(f"  Pacientes a marcar: {len(pacientes_lista)}")
             L(f"  Limite por PDF: {limite_pacientes_pdf} pacientes")
-            L(f"  VERIFICACION ACTIVA: nombre + control interno + MU/OB/NOG/GYM/observacion")
+            L(f"  VERIFICACION ACTIVA: nombre + control interno + MU/OB/observacion")
             L(f"{'='*50}")
 
             if not LAB_USER or not LAB_PASS:
@@ -4807,7 +4539,7 @@ class MainApp:
             if not pacientes_lista:
                 L("  ERROR: la lista no tiene pacientes"); return
             if not mu_esperado:
-                L("  ADVERTENCIA: no encontre MU/OB/NOG/GYM en historial; usare observacion completa como respaldo")
+                L("  ADVERTENCIA: no encontre MU/OB en historial; usare observacion completa como respaldo")
 
             ts_now = datetime.now().strftime("%Y%m%d_%H%M%S")
             pdf_base = f"etiquetas_{nombre_archivo_seguro(nombre_lista)}_{ts_now}"
