@@ -1,9 +1,14 @@
 # Configuración local con credenciales (NO subir)
 config.json
 appkey.txt
+.env
 
 # Datos de usuario y archivos de trabajo
 data/
+_update_cache.json
+_actualizar_fluxlab.ps1
+_actualizar_fluxlab.bat
+*_nuevo.exe
 *.jfif
 *.jpe
 pruebas.txt
