@@ -1479,6 +1479,8 @@ class ValidacionWindow:
         self.log_fn    = log_fn
         self.refresh_fn= refresh_fn
         self.pacientes = [p.copy() for p in hoja["data"]["pacientes"]]
+        self.modo_seleccion = False
+        self.pacientes_seleccionados = set()
 
         self.win = tk.Toplevel(parent)
         self.win.title(f"Validar: {hoja['nombre']}")
@@ -1566,8 +1568,39 @@ class ValidacionWindow:
         right = tk.Frame(body, bg=COLORS["bg"])
         right.pack(side="left", fill="both", expand=True)
 
-        tk.Label(right, text="Pacientes", bg=COLORS["bg"], fg=COLORS["text"],
-                 font=(FONT_UI, 12, "bold")).pack(anchor="w", pady=(0, 6))
+        barra_pacientes = tk.Frame(right, bg=COLORS["bg"])
+        barra_pacientes.pack(fill="x", pady=(0, 6))
+        tk.Label(barra_pacientes, text="Pacientes", bg=COLORS["bg"], fg=COLORS["text"],
+                 font=(FONT_UI, 12, "bold")).pack(side="left")
+
+        self.lbl_seleccionados = tk.Label(
+            barra_pacientes, text="", bg=COLORS["bg"], fg=COLORS["blue"],
+            font=(FONT_UI, 9, "bold"))
+        self.lbl_seleccionados.pack(side="left", padx=(10, 0))
+
+        self.btn_borrar_pacientes = tk.Button(
+            barra_pacientes, text="Borrar paciente", bg=COLORS["red_soft"],
+            fg=COLORS["red"], activebackground="#5C1212",
+            activeforeground=COLORS["red"], font=(FONT_UI, 9, "bold"),
+            relief="flat", cursor="hand2", padx=10, pady=5,
+            command=self._borrar_pacientes)
+        self.btn_borrar_pacientes.pack(side="right")
+
+        self.btn_agregar_paciente = tk.Button(
+            barra_pacientes, text="+ Agregar paciente", bg=COLORS["green_soft"],
+            fg=COLORS["green"], activebackground="#065F46",
+            activeforeground=COLORS["white"], font=(FONT_UI, 9, "bold"),
+            relief="flat", cursor="hand2", padx=10, pady=5,
+            command=self._agregar_paciente)
+        self.btn_agregar_paciente.pack(side="right", padx=(0, 6))
+
+        self.btn_seleccionar = tk.Button(
+            barra_pacientes, text="Seleccionar", bg=COLORS["blue_soft"],
+            fg=COLORS["blue"], activebackground=COLORS["blue_glow"],
+            activeforeground=COLORS["white"], font=(FONT_UI, 9, "bold"),
+            relief="flat", cursor="hand2", padx=10, pady=5,
+            command=self._alternar_modo_seleccion)
+        self.btn_seleccionar.pack(side="right", padx=(0, 6))
 
         # ── NUEVA BARRA v4.2: Estudios Generales + botones Confirmar / Basura ──
         barra_estudios = tk.Frame(right, bg=COLORS["bg"])
@@ -1636,12 +1669,13 @@ class ValidacionWindow:
         tf.pack(fill="both", expand=True)
 
         # ── Columnas con Sexo y Edad ──────────────────────────────────────
-        cols = ("#","Numero","Nombre","Sexo","Edad","F.Nac","Estudios")
+        cols = ("Sel","#","Numero","Nombre","Sexo","Edad","F.Nac","Estudios")
         self.tabla = ttk.Treeview(tf, columns=cols, show="headings", height=20)
-        self.anchos_tabla = {"#":42,"Numero":110,"Nombre":360,"Sexo":55,"Edad":55,"F.Nac":100,"Estudios":1200}
+        self.anchos_tabla = {"Sel":48,"#":42,"Numero":110,"Nombre":360,"Sexo":55,"Edad":55,"F.Nac":100,"Estudios":1200}
         for c in cols:
-            self.tabla.heading(c, text=c)
-            self.tabla.column(c, width=self.anchos_tabla[c], minwidth=self.anchos_tabla[c], anchor="w", stretch=False)
+            self.tabla.heading(c, text="" if c == "Sel" else c)
+            self.tabla.column(c, width=self.anchos_tabla[c], minwidth=self.anchos_tabla[c],
+                              anchor="center" if c == "Sel" else "w", stretch=False)
 
         sb_y = ttk.Scrollbar(tf, orient="vertical", command=self.tabla.yview)
         sb_x = ttk.Scrollbar(tf, orient="horizontal", command=self.tabla.xview)
@@ -1651,7 +1685,11 @@ class ValidacionWindow:
         self.tabla.pack(side="left", fill="both", expand=True, padx=(12, 0), pady=12)
 
         self.tabla.bind("<Double-1>", self._editar_fila)
+        self.tabla.bind("<Button-1>", self._clic_seleccion_grupal)
         self.tabla.bind("<Button-3>", self._menu_contextual)
+        self.tabla.tag_configure("seleccionado_grupo",
+                                 background=COLORS["blue_soft"],
+                                 foreground=COLORS["white"])
         self._poblar_tabla()
 
     # ── NUEVO v4.2: Aplicar estudio(s) general(es) a todos los pacientes ──────
@@ -1710,21 +1748,130 @@ class ValidacionWindow:
         self.tabla.column("Estudios", width=ancho, minwidth=ancho, stretch=False)
 
     def _poblar_tabla(self):
+        try:
+            posicion_scroll = self.tabla.yview()[0]
+        except Exception:
+            posicion_scroll = 0.0
         self.tabla.delete(*self.tabla.get_children())
+        self.pacientes_seleccionados = {
+            idx for idx in self.pacientes_seleccionados
+            if 0 <= idx < len(self.pacientes)
+        }
         for i, p in enumerate(self.pacientes, 1):
             sexo_disp  = p.get("sexo", "")
             edad_disp  = p.get("edad", "")
             fn_disp    = p.get("fecha_nacimiento", "")
+            seleccionado = (i - 1) in self.pacientes_seleccionados
             self.tabla.insert("", "end", iid=str(i-1),
-                values=(i,
+                values=(("☑" if seleccionado else "☐") if self.modo_seleccion else "",
+                        i,
                         p.get("numero",""),
                         p.get("nombre",""),
                         sexo_disp,
                         edad_disp,
                         fn_disp,
-                        ", ".join(p.get("estudios",[]))))
+                        ", ".join(p.get("estudios",[]))),
+                tags=("seleccionado_grupo",) if seleccionado else ())
         self._ajustar_ancho_estudios()
         self._actualizar_resumen()
+        self._actualizar_estado_seleccion()
+        self.tabla.yview_moveto(posicion_scroll)
+
+    def _alternar_modo_seleccion(self):
+        self.modo_seleccion = not self.modo_seleccion
+        if not self.modo_seleccion:
+            self.pacientes_seleccionados.clear()
+        self._poblar_tabla()
+
+    def _clic_seleccion_grupal(self, event):
+        if not self.modo_seleccion:
+            return None
+        fila = self.tabla.identify_row(event.y)
+        if not fila:
+            return "break"
+        idx = int(fila)
+        if idx in self.pacientes_seleccionados:
+            self.pacientes_seleccionados.remove(idx)
+        else:
+            self.pacientes_seleccionados.add(idx)
+        self._poblar_tabla()
+        return "break"
+
+    def _actualizar_estado_seleccion(self):
+        cantidad = len(self.pacientes_seleccionados)
+        if self.modo_seleccion:
+            self.btn_seleccionar.config(
+                text="Cancelar selección", bg=COLORS["blue"], fg=COLORS["white"])
+            self.lbl_seleccionados.config(
+                text=f"{cantidad} seleccionado{'s' if cantidad != 1 else ''}")
+            self.btn_borrar_pacientes.config(
+                text=f"Borrar seleccionados ({cantidad})" if cantidad
+                else "Borrar seleccionados")
+        else:
+            self.btn_seleccionar.config(
+                text="Seleccionar", bg=COLORS["blue_soft"], fg=COLORS["blue"])
+            self.lbl_seleccionados.config(text="")
+            self.btn_borrar_pacientes.config(text="Borrar paciente")
+
+    def _borrar_pacientes(self):
+        if self.modo_seleccion:
+            indices = sorted(self.pacientes_seleccionados)
+            if not indices:
+                messagebox.showwarning(
+                    "Sin selección",
+                    "Marca al menos un paciente para borrarlo.",
+                    parent=self.win)
+                return
+            cantidad = len(indices)
+            nombres = [self.pacientes[i].get("nombre", "?") for i in indices]
+            muestra = "\n".join(f"• {nombre}" for nombre in nombres[:8])
+            if cantidad > 8:
+                muestra += f"\n• ... y {cantidad - 8} más"
+            if not messagebox.askyesno(
+                "Borrar pacientes en grupo",
+                f"¿Eliminar {cantidad} paciente{'s' if cantidad != 1 else ''}?\n\n"
+                f"{muestra}",
+                icon="warning",
+                parent=self.win,
+            ):
+                return
+            for idx in reversed(indices):
+                self.pacientes.pop(idx)
+            self.log_fn(f"  {cantidad} pacientes eliminados en grupo.")
+            self.pacientes_seleccionados.clear()
+            self.modo_seleccion = False
+            self._poblar_tabla()
+            return
+
+        seleccion = self.tabla.selection()
+        if not seleccion:
+            messagebox.showwarning(
+                "Sin selección",
+                "Selecciona un paciente de la tabla o activa el modo Seleccionar.",
+                parent=self.win)
+            return
+        self._eliminar(int(seleccion[0]))
+
+    def _agregar_paciente(self):
+        if self.modo_seleccion:
+            self.modo_seleccion = False
+            self.pacientes_seleccionados.clear()
+
+        paciente_nuevo = {
+            "numero": "",
+            "nombre": "",
+            "estudios": [],
+            "sexo": "",
+            "edad": "",
+            "fecha_nacimiento": "",
+        }
+        self.pacientes.append(paciente_nuevo)
+        idx = len(self.pacientes) - 1
+        self._poblar_tabla()
+        self.tabla.selection_set(str(idx))
+        self.tabla.focus(str(idx))
+        self.tabla.see(str(idx))
+        self._editar_fila(None, idx_forzado=idx, paciente_nuevo=True)
 
     def _armar_selector_doctor(self, entry, var, opciones):
         """Lista flotante propia: aparece al dar clic, filtra mientras se
@@ -1834,12 +1981,21 @@ class ValidacionWindow:
             self.btn_ok.config(state="disabled", bg=COLORS["green_soft"],
                                fg=COLORS["green"], activebackground=COLORS["green_soft"])
 
-    def _editar_fila(self, event):
-        sel = self.tabla.selection()
-        if not sel: return
-        idx = int(sel[0]); pac = self.pacientes[idx]
+    def _editar_fila(self, event, idx_forzado=None, paciente_nuevo=False):
+        if self.modo_seleccion:
+            return
+        if idx_forzado is None:
+            sel = self.tabla.selection()
+            if not sel: return
+            idx = int(sel[0])
+        else:
+            idx = idx_forzado
+        if not (0 <= idx < len(self.pacientes)):
+            return
+        pac = self.pacientes[idx]
         win = tk.Toplevel(self.win)
-        win.title("Editar paciente"); win.geometry("440x620")
+        win.title("Agregar paciente" if paciente_nuevo else "Editar paciente")
+        win.geometry("440x620")
         win.configure(bg=COLORS["bg"]); win.grab_set(); win.resizable(False, False)
         ce = {}
         def fila(label, key, val):
@@ -1869,8 +2025,15 @@ class ValidacionWindow:
              pac.get("fecha_nacimiento", ""))
 
         def guardar():
+            nombre = ce["nombre"].get().strip().upper()
+            if not nombre:
+                messagebox.showwarning(
+                    "Nombre requerido",
+                    "Escribe el nombre del paciente antes de guardar.",
+                    parent=win)
+                return
             pac["numero"] = ce["numero"].get().strip()
-            pac["nombre"] = ce["nombre"].get().strip().upper()
+            pac["nombre"] = nombre
             ests = [e.strip() for e in ce["estudios"].get().split(",") if e.strip()]
             pac["estudios"] = procesar_estudios(ests)
             sexo_raw = ce["sexo"].get().strip().upper()
@@ -1878,12 +2041,27 @@ class ValidacionWindow:
             edad_raw = ce["edad"].get().strip()
             pac["edad"] = edad_raw if edad_raw.isdigit() else ""
             pac["fecha_nacimiento"] = ce["fecha_nacimiento"].get().strip()
-            self._poblar_tabla(); win.destroy()
+            self._poblar_tabla()
+            if paciente_nuevo:
+                self.log_fn(f"  Paciente agregado manualmente: {pac['nombre']}")
+            win.destroy()
+
+        def cancelar():
+            if paciente_nuevo and idx < len(self.pacientes) and self.pacientes[idx] is pac:
+                self.pacientes.pop(idx)
+                self._poblar_tabla()
+            win.destroy()
+
+        win.protocol("WM_DELETE_WINDOW", cancelar)
 
         tk.Button(win, text="Guardar", command=guardar,
                   bg=COLORS["blue"], fg="#000", relief="flat",
                   font=("Courier", 9, "bold"), cursor="hand2",
-                  padx=16, pady=6).pack(pady=14)
+                  padx=16, pady=6).pack(side="left", padx=(105, 6), pady=14)
+        tk.Button(win, text="Cancelar", command=cancelar,
+                  bg=COLORS["bg_hover"], fg=COLORS["text_muted"], relief="flat",
+                  font=("Courier", 9, "bold"), cursor="hand2",
+                  padx=16, pady=6).pack(side="left", padx=(0, 6), pady=14)
 
     def _menu_contextual(self, event):
         sel = self.tabla.identify_row(event.y)
