@@ -357,7 +357,7 @@ DOCTORES_OPCIONES = [
 # Sube cada nuevo .exe como "Release" en este repositorio (puede ser privado);
 # la app consulta la API de GitHub para saber si hay una versión más nueva.
 # IMPORTANTE: al sacar una versión nueva, recuerda subir también este número.
-APP_VERSION = "5.5"
+APP_VERSION = "5.6"
 GITHUB_REPO = "Felixpe4/FluxLab2.0"
 
 def _version_tupla(version: str) -> tuple:
@@ -834,7 +834,7 @@ CATALOGO = {
     "CREATINCINASA FRACCION MB": "CKMB", "CREATINFOSFOQUINASA": "CPK", "CK": "CPK", "CKMB": "CKMB", "CPK": "CPK",
     "GLUP":"GLUPOS", "CTG":"CTG",  "CLUP":"CTG",  "TCLU":"CTG",  "GLUPOS": "GLUPOS",
     "E2":  "ESTRADIOL", "ESTRADIOL": "ESTRADIOL", "HCG": "HCG", "BGCH":"HCG", "GHC":"HCG", "HGCH":"HCG", "FB":"HCG", "P4":"PROGESTERONA", "PROG":"PROGESTERONA", "PROGESTERONA": "PROGESTERONA",
-    "VD3": "125V",
+    "VD3": "25 H",
     "TOXO IGG":"TOXG",  "TOXO IGM":"TOXM", "TOXG": "TOXG", "TOXM": "TOXM",
     "RUB IGG": "ACRUB", "RUB IGM": "ACRM", "ACRUB": "ACRUB", "ACRM": "ACRM",
     "CMVI IGG":"CMV",   "CMVI IGM":"CMVM", "CMV": "CMV", "CMVM": "CMVM",
@@ -872,7 +872,7 @@ CATALOGO = {
     "VDRL": "VDRL", "IGG": "INMUNOGLOBULINA G IgG", "INMUNOGLOBULINA G IgG": "INMUNOGLOBULINA G IgG", "HCA":"HORMONA DEL CRECIMIENTO", "HORMONA DEL CRECIMIENTO": "HORMONA DEL CRECIMIENTO", 
     "CAL24":"CAU4", "CALCIO EN ORINA 24 HORAS":"CAU4",  "CAU4": "CAU4",
     "ACAN": "SSA", "SSA": "SSA", "ACAS": "SMITH", "SMITH": "SMITH", "MPO": "MIELO", "MIELO": "MIELO", "ACAP": "ANTICUERPOS ANTI-CITOPLASMA C-ANCA", "ANTICUERPOS ANTI-CITOPLASMA C-ANCA": "ANTICUERPOS ANTI-CITOPLASMA C-ANCA", 
-    "ACAV": "VAL", "VD25": "125V", "VD": "125V", "HIDROXICOLECALCIFEROL": "125V",
+    "ACAV": "VAL", "VD25": "25 H", "VD": "25 H", "HIDROXICOLECALCIFEROL": "25 H",
 }
 
 # ── v4.2: EXPANSIONES — un término → lista de estudios reales ─────────────────
