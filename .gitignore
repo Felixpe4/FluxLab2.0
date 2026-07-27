@@ -22,8 +22,15 @@ check_key.py
 # Entornos virtuales
 .venv/
 build_venv/
+build_venv311/
+build_python311/
+build_python312/
 venv/
 env/
+
+# Instaladores locales usados para reparar/crear el entorno de compilación
+python-*-amd64.exe
+debug_tcl/
 
 # Compilados
 dist/

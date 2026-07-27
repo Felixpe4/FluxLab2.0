@@ -6,12 +6,17 @@ Python instalado en la PC destino).
 Uso:  pyinstaller fluxlab.spec    (o simplemente correr compilar.bat)
 """
 import pathlib
+import sys
 import customtkinter
 import playwright
 
 BASE_DIR = pathlib.Path(SPECPATH)
 CTK_DIR  = pathlib.Path(customtkinter.__file__).parent
 PW_DIR   = pathlib.Path(playwright.__file__).parent
+PYTHON_DIR = pathlib.Path(sys.base_prefix)
+TCL_DIR = PYTHON_DIR / "tcl"
+DLLS_DIR = PYTHON_DIR / "DLLs"
+TKINTER_DIR = PYTHON_DIR / "Lib" / "tkinter"
 
 # CustomTkinter carga sus temas/assets como archivos sueltos en tiempo de
 # ejecución — hay que incluir la carpeta completa para que el .exe los encuentre.
@@ -25,6 +30,27 @@ datas = [
     (str(PW_DIR), "playwright"),
 ]
 
+# Tkinter se incluye de forma explícita. En algunas instalaciones de Python,
+# PyInstaller no consigue inicializar Tcl durante el análisis y excluye
+# tkinter aunque los archivos sí estén instalados. El ejecutable resultante
+# fallaría al arrancar con "No module named tkinter".
+for origen, destino in [
+    (TCL_DIR / "tcl8.6", "_tcl_data"),
+    (TCL_DIR / "tk8.6", "_tk_data"),
+    # Se agrega también como datos porque el hook estándar de PyInstaller
+    # puede excluir el módulo al no poder inicializar Tcl en la PC de build.
+    (TKINTER_DIR, "tkinter"),
+]:
+    if origen.exists():
+        datas.append((str(origen), destino))
+
+tk_binaries = [
+    DLLS_DIR / "_tkinter.pyd",
+    DLLS_DIR / "tcl86t.dll",
+    DLLS_DIR / "tk86t.dll",
+]
+binaries_tk = [(str(archivo), ".") for archivo in tk_binaries if archivo.exists()]
+
 logo = BASE_DIR / "logo_fluxlab.png"
 if logo.exists():
     datas.append((str(logo), "."))
@@ -37,10 +63,15 @@ ICON_PATH = str(icono) if icono.exists() else None
 a = Analysis(
     [str(BASE_DIR / "FluxLab")],
     pathex=[str(BASE_DIR)],
-    binaries=[],
+    binaries=binaries_tk,
     datas=datas,
     hiddenimports=[
         "customtkinter",
+        "tkinter",
+        "tkinter.ttk",
+        "tkinter.font",
+        "tkinter.messagebox",
+        "tkinter.filedialog",
         "PIL._tkinter_finder",
         "anthropic",
         "playwright",
@@ -48,7 +79,7 @@ a = Analysis(
     ],
     hookspath=[],
     hooksconfig={},
-    runtime_hooks=[],
+    runtime_hooks=[str(BASE_DIR / "runtime_tkinter.py")],
     excludes=[],
     noarchive=False,
 )
