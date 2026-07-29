@@ -357,7 +357,7 @@ DOCTORES_OPCIONES = [
 # Sube cada nuevo .exe como "Release" en este repositorio (puede ser privado);
 # la app consulta la API de GitHub para saber si hay una versión más nueva.
 # IMPORTANTE: al sacar una versión nueva, recuerda subir también este número.
-APP_VERSION = "5.6"
+APP_VERSION = "5.7"
 GITHUB_REPO = "Felixpe4/FluxLab2.0"
 
 def _version_tupla(version: str) -> tuple:
@@ -467,8 +467,13 @@ def preparar_actualizacion(url_descarga: str, version_nueva: str,
         return False
 
     import urllib.request
-    exe_actual = pathlib.Path(sys.executable)
-    exe_nuevo  = exe_actual.with_name(exe_actual.stem + "_nuevo.exe")
+    # El nombre final siempre es FluxLab.exe en la misma carpeta desde la que
+    # se ejecuta la app (normalmente el Escritorio). Aunque una versión vieja
+    # se haya abierto como FluxLab_nuevo.exe, la actualización vuelve al nombre
+    # canónico y limpia el duplicado.
+    exe_en_ejecucion = pathlib.Path(sys.executable)
+    exe_destino = exe_en_ejecucion.with_name("FluxLab.exe")
+    exe_nuevo = exe_en_ejecucion.with_name("_FluxLab_actualizacion.exe")
     try:
         exe_nuevo.unlink(missing_ok=True)
     except Exception:
@@ -557,57 +562,84 @@ def preparar_actualizacion(url_descarga: str, version_nueva: str,
     # PowerShell maneja mejor los permisos, la espera de proceso y el
     # relanzamiento. Se ejecuta con -ExecutionPolicy Bypass para que funcione
     # en cualquier PC sin importar la política de ejecución configurada.
-    pid_app   = os.getpid()
-    nombre    = exe_actual.name
-    stem      = exe_actual.stem
-    ps_path   = exe_actual.with_name("_actualizar_fluxlab.ps1")
+    pid_app = os.getpid()
+    ps_path = exe_en_ejecucion.with_name("_actualizar_fluxlab.ps1")
+
+    def ps_literal(valor) -> str:
+        return str(valor).replace("'", "''")
+
     ps_script = (
-        f"$viejo  = '{exe_actual}'\r\n"
-        f"$nuevo  = '{exe_nuevo}'\r\n"
+        f"$ejecutando = '{ps_literal(exe_en_ejecucion)}'\r\n"
+        f"$destino    = '{ps_literal(exe_destino)}'\r\n"
+        f"$nuevo      = '{ps_literal(exe_nuevo)}'\r\n"
+        f"$respaldo   = '{ps_literal(exe_destino)}.bak'\r\n"
         f"$pidApp = {pid_app}\r\n"
-        f"$nombre = '{nombre}'\r\n"
-        f"$stem   = '{stem}'\r\n"
         "\r\n"
-        "# 1. Esperar que cierre el proceso original\r\n"
+        "$ErrorActionPreference = 'Stop'\r\n"
+        "\r\n"
+        "# 1. Esperar que cierre la ventana y el proceso hijo actual\r\n"
         "while (Get-Process -Id $pidApp -ErrorAction SilentlyContinue) {\r\n"
-        "    Start-Sleep -Seconds 1\r\n"
+        "    Start-Sleep -Milliseconds 500\r\n"
         "}\r\n"
         "\r\n"
-        "# 2. Pausa para que el antivirus y Windows suelten los handles\r\n"
-        "Start-Sleep -Seconds 6\r\n"
+        "# PyInstaller mantiene un segundo proceso con el mismo ejecutable.\r\n"
+        "# Esperar todos los procesos asociados a la copia actual o al destino.\r\n"
+        "$limite = (Get-Date).AddSeconds(90)\r\n"
+        "do {\r\n"
+        "    $activos = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |\r\n"
+        "        Where-Object { $_.ExecutablePath -eq $ejecutando -or $_.ExecutablePath -eq $destino })\r\n"
+        "    if ($activos.Count -eq 0) { break }\r\n"
+        "    Start-Sleep -Milliseconds 750\r\n"
+        "} while ((Get-Date) -lt $limite)\r\n"
         "\r\n"
-        "# 3. Reemplazar exe con reintentos (hasta 40 s)\r\n"
-        "$ok = $false\r\n"
-        "for ($i = 0; $i -lt 40; $i++) {\r\n"
-        "    try {\r\n"
-        "        Move-Item -Force -LiteralPath $nuevo -Destination $viejo -ErrorAction Stop\r\n"
-        "        $ok = $true; break\r\n"
-        "    } catch {\r\n"
-        "        Start-Sleep -Seconds 1\r\n"
+        "if ($activos.Count -gt 0) {\r\n"
+        "    $activos | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }\r\n"
+        "    Start-Sleep -Seconds 3\r\n"
+        "}\r\n"
+        "\r\n"
+        "# 2. Reemplazo transaccional: respaldo temporal -> nuevo -> limpieza.\r\n"
+        "try {\r\n"
+        "    Remove-Item -LiteralPath $respaldo -Force -ErrorAction SilentlyContinue\r\n"
+        "    if (Test-Path -LiteralPath $destino) {\r\n"
+        "        Move-Item -LiteralPath $destino -Destination $respaldo -Force\r\n"
         "    }\r\n"
-        "}\r\n"
+        "    Move-Item -LiteralPath $nuevo -Destination $destino -Force\r\n"
         "\r\n"
-        "if (-not $ok) {\r\n"
+        "    # Si se ejecutó una copia llamada _nuevo, eliminarla al quedar libre.\r\n"
+        "    if ($ejecutando -ne $destino -and (Test-Path -LiteralPath $ejecutando)) {\r\n"
+        "        Remove-Item -LiteralPath $ejecutando -Force -ErrorAction SilentlyContinue\r\n"
+        "    }\r\n"
+        "\r\n"
+        "    # Limpiar duplicados de actualizaciones anteriores.\r\n"
+        "    $carpeta = Split-Path -Parent $destino\r\n"
+        "    Get-ChildItem -LiteralPath $carpeta -File -ErrorAction SilentlyContinue |\r\n"
+        "        Where-Object {\r\n"
+        "            $_.FullName -ne $destino -and\r\n"
+        "            $_.Name -match '^FluxLab_(nuevo|anterior|viejo|backup).*[.]exe$'\r\n"
+        "        } | Remove-Item -Force -ErrorAction SilentlyContinue\r\n"
+        "\r\n"
+        "    Start-Process -FilePath $destino -WorkingDirectory $carpeta\r\n"
+        "    Start-Sleep -Seconds 2\r\n"
+        "    Remove-Item -LiteralPath $respaldo -Force -ErrorAction SilentlyContinue\r\n"
+        "} catch {\r\n"
+        "    # Si algo falla, restaurar la versión anterior y borrar la descarga.\r\n"
+        "    if (-not (Test-Path -LiteralPath $destino) -and (Test-Path -LiteralPath $respaldo)) {\r\n"
+        "        Move-Item -LiteralPath $respaldo -Destination $destino -Force -ErrorAction SilentlyContinue\r\n"
+        "    }\r\n"
+        "    Remove-Item -LiteralPath $nuevo -Force -ErrorAction SilentlyContinue\r\n"
+        "    if (Test-Path -LiteralPath $destino) {\r\n"
+        "        Start-Process -FilePath $destino -WorkingDirectory (Split-Path -Parent $destino)\r\n"
+        "    }\r\n"
         "    Add-Type -AssemblyName System.Windows.Forms\r\n"
         "    [System.Windows.Forms.MessageBox]::Show(\r\n"
         "        'No se pudo instalar la actualizacion.' + [char]10 +\r\n"
-        "        'Cierra cualquier ventana de FluxLab y vuelve a intentarlo,' + [char]10 +\r\n"
-        "        'o reemplaza el .exe manualmente.',\r\n"
+        "        'Se restauro la version anterior y no se dejo una copia duplicada.',\r\n"
         "        'FluxLab - Error de actualizacion',\r\n"
         "        [System.Windows.Forms.MessageBoxButtons]::OK,\r\n"
         "        [System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null\r\n"
-        "    exit 1\r\n"
+        "} finally {\r\n"
+        "    Remove-Item -LiteralPath $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyContinue\r\n"
         "}\r\n"
-        "\r\n"
-        "# 4. Relanzar la app (hasta 3 intentos)\r\n"
-        "for ($j = 0; $j -lt 3; $j++) {\r\n"
-        "    Start-Process -FilePath $viejo\r\n"
-        "    Start-Sleep -Seconds 5\r\n"
-        "    if (Get-Process -Name $stem -ErrorAction SilentlyContinue) { break }\r\n"
-        "}\r\n"
-        "\r\n"
-        "# 5. Auto-borrar este script\r\n"
-        "Remove-Item -LiteralPath $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyContinue\r\n"
     )
 
     try:
@@ -628,18 +660,28 @@ def preparar_actualizacion(url_descarga: str, version_nueva: str,
     except Exception as e:
         # Fallback a .bat si PowerShell no está disponible
         L(f"  PowerShell no disponible ({e}), usando método alternativo...")
-        bat_path = exe_actual.with_name("_actualizar_fluxlab.bat")
+        bat_path = exe_en_ejecucion.with_name("_actualizar_fluxlab.bat")
         bat = (
             "@echo off\r\nsetlocal enabledelayedexpansion\r\n"
-            f"set PID={pid_app}\r\nset \"VIEJO={exe_actual}\"\r\n"
-            f"set \"NUEVO={exe_nuevo}\"\r\nset \"NOMBRE={nombre}\"\r\n"
+            f"set PID={pid_app}\r\nset \"ACTUAL={exe_en_ejecucion}\"\r\n"
+            f"set \"DESTINO={exe_destino}\"\r\nset \"NUEVO={exe_nuevo}\"\r\n"
+            f"set \"RESPALDO={exe_destino}.bak\"\r\n"
             ":w\r\ntasklist /FI \"PID eq %PID%\" 2>NUL | find \"%PID%\" >NUL\r\n"
             "if not errorlevel 1 (timeout /t 1 /nobreak >nul & goto w)\r\n"
-            "timeout /t 6 /nobreak >nul\r\nset I=0\r\n"
-            ":r\r\nmove /y \"%NUEVO%\" \"%VIEJO%\" >nul 2>&1\r\n"
-            "if exist \"%NUEVO%\" (set /a I+=1 & if !I! LSS 40"
-            " (timeout /t 1 /nobreak >nul & goto r))\r\n"
-            "start \"\" \"%VIEJO%\"\r\ndel \"%~f0\"\r\n"
+            "timeout /t 8 /nobreak >nul\r\n"
+            "del /q \"%RESPALDO%\" >nul 2>&1\r\n"
+            "if exist \"%DESTINO%\" move /y \"%DESTINO%\" \"%RESPALDO%\" >nul 2>&1\r\n"
+            "move /y \"%NUEVO%\" \"%DESTINO%\" >nul 2>&1\r\n"
+            "if not exist \"%DESTINO%\" (\r\n"
+            "  if exist \"%RESPALDO%\" move /y \"%RESPALDO%\" \"%DESTINO%\" >nul 2>&1\r\n"
+            "  del /q \"%NUEVO%\" >nul 2>&1\r\n"
+            "  goto fin\r\n"
+            ")\r\n"
+            "if /I not \"%ACTUAL%\"==\"%DESTINO%\" del /q \"%ACTUAL%\" >nul 2>&1\r\n"
+            "start \"\" \"%DESTINO%\"\r\n"
+            "timeout /t 2 /nobreak >nul\r\n"
+            "del /q \"%RESPALDO%\" >nul 2>&1\r\n"
+            ":fin\r\ndel \"%~f0\"\r\n"
         )
         try:
             bat_path.write_text(bat, encoding="utf-8")
@@ -872,7 +914,7 @@ CATALOGO = {
     "VDRL": "VDRL", "IGG": "INMUNOGLOBULINA G IgG", "INMUNOGLOBULINA G IgG": "INMUNOGLOBULINA G IgG", "HCA":"HORMONA DEL CRECIMIENTO", "HORMONA DEL CRECIMIENTO": "HORMONA DEL CRECIMIENTO", 
     "CAL24":"CAU4", "CALCIO EN ORINA 24 HORAS":"CAU4",  "CAU4": "CAU4",
     "ACAN": "SSA", "SSA": "SSA", "ACAS": "SMITH", "SMITH": "SMITH", "MPO": "MIELO", "MIELO": "MIELO", "ACAP": "ANTICUERPOS ANTI-CITOPLASMA C-ANCA", "ANTICUERPOS ANTI-CITOPLASMA C-ANCA": "ANTICUERPOS ANTI-CITOPLASMA C-ANCA", 
-    "ACAV": "VAL", "VD25": "25 H", "VD": "25 H", "HIDROXICOLECALCIFEROL": "25 H",
+    "CARGA VIRAL DE VIH-1": "CARGA VIRAL DE VIH", "ACAV": "VAL", "VD25": "25 H", "VD": "25 H", "HIDROXICOLECALCIFEROL": "25 H",
 }
 
 # ── v4.2: EXPANSIONES — un término → lista de estudios reales ─────────────────
@@ -988,6 +1030,15 @@ SELECCION_MANUAL_ESTUDIOS = {
 
 def normalizar_estudio(est: str) -> str:
     e = est.strip().upper()
+    # Hojas de infectología pueden imprimir el mismo estudio varias veces y
+    # acompañarlo de una descripción larga. Resolver estas dos pruebas antes
+    # del catálogo genérico evita que "CARGA VIRAL DE VIH" caiga por error en
+    # la equivalencia corta VIH -> HIV.
+    if "CARGA VIRAL" in e and (
+            "VIH" in e or "INMUNODEFICIENCIA HUMANA" in e):
+        return "CARGA VIRAL DE VIH"
+    if "CD4" in e and ("LINFOCITO" in e or e == "CD4"):
+        return "LINFOCITOS CD4"
     if e in CATALOGO:
         return CATALOGO[e]
     for tir in TIROIDEOS_EXACTOS:
@@ -3328,6 +3379,9 @@ class MainApp:
         LAB_URL     = f"{LAB_BASE_URL}/nuevo"
         T_PAC       = 1.8
         MAX_INT     = 4
+        T_BUSQUEDA_PACIENTE = 4500
+        T_PACIENTE_CREADO   = 7000
+        DELAY_NOMBRE        = 55
         L           = self._log
         nombre_hoja = hoja["nombre"]
         tag         = f"[{nombre_hoja[:20]}] "
@@ -3384,7 +3438,8 @@ class MainApp:
                 return True
             return False
 
-        def autocomplete(page, buscar, t=9000, exacto=False, estudio=False):
+        def autocomplete(page, buscar, t=9000, exacto=False, estudio=False,
+                         resultado_detallado=False):
             try:
                 page.wait_for_selector(
                     "ul.ui-autocomplete:visible li.ui-menu-item",
@@ -3392,7 +3447,7 @@ class MainApp:
                 )
             except PWT:
                 L(f"{tag}Sin autocomplete: {buscar}")
-                return False
+                return "sin_opciones" if resultado_detallado else False
 
             items = page.locator(
                 "ul.ui-autocomplete:visible li.ui-menu-item"
@@ -3436,7 +3491,7 @@ class MainApp:
                 if not estudio and nombre_paciente_igual(txt, bu):
                     items.nth(i).click()
                     time.sleep(0.5)
-                    return True
+                    return "exacto" if resultado_detallado else True
 
             # Si hay varias opciones y se pidió exactitud
             if estudio:
@@ -3464,7 +3519,7 @@ class MainApp:
                     f"  Sin coincidencia exacta para "
                     f"'{buscar}'. Opciones: {opciones}"
                 )
-                return False
+                return "opciones" if resultado_detallado else False
 
             # Coincidencia parcial
             for i in range(count):
@@ -3525,8 +3580,9 @@ class MainApp:
 
             page.click("#NuevoCliente"); time.sleep(3)
             if modal_vis(page):
-                titulo, _ = leer_modal(page)
-                if "ya existe" in titulo.lower() or "base de datos" in titulo.lower():
+                titulo, sub = leer_modal(page)
+                mensaje_modal = f"{titulo} {sub}".lower()
+                if "ya existe" in mensaje_modal or "base de datos" in mensaje_modal:
                     L(f"{tag}Paciente ya existe; reintentare seleccion exacta")
                     for _ in range(2):
                         cerrar_esc(page)
@@ -3542,25 +3598,52 @@ class MainApp:
             if not nombre:
                 return False
 
-            # 1) Buscar tal cual esta escrito en la lista
-            escribir(page, "#nuevo_cliente", nombre, delay=85)
-            if autocomplete(page, nombre, t=12000, exacto=True):
+            # 1) Buscar tal cual esta escrito en la lista.
+            # Solo se intenta la variante con punto cuando el portal sí ofrece
+            # opciones, pero ninguna coincide exactamente con el nombre.
+            escribir(page, "#nuevo_cliente", nombre, delay=DELAY_NOMBRE)
+            resultado = autocomplete(
+                page, nombre, t=T_BUSQUEDA_PACIENTE, exacto=True,
+                resultado_detallado=True)
+            if resultado == "exacto":
                 return True
 
-            # 2) Buscar con punto final (variante ya registrada en el sistema)
-            nombre_pto = nombre_con_punto(nombre)
-            escribir(page, "#nuevo_cliente", nombre_pto, delay=85)
-            if autocomplete(page, nombre_pto, t=12000, exacto=True):
-                return True
+            # 2) Hay candidatos parecidos: probar la variante ya registrada
+            # con punto final. Si tampoco es exacta, no se conserva el punto.
+            if resultado == "opciones":
+                nombre_pto = nombre_con_punto(nombre)
+                escribir(page, "#nuevo_cliente", nombre_pto, delay=DELAY_NOMBRE)
+                resultado_pto = autocomplete(
+                    page, nombre_pto, t=T_BUSQUEDA_PACIENTE, exacto=True,
+                    resultado_detallado=True)
+                if resultado_pto == "exacto":
+                    return True
 
-            # 3) No existe -> crear paciente nuevo, siempre con punto final
-            pac_pto = pac.copy()
-            pac_pto["nombre"] = nombre_pto
-            L(f"{tag}No existe '{nombre}' ni '{nombre_pto}'; creare paciente nuevo: {nombre_pto}")
-            crear_paciente(page, pac_pto)
+            # 3) No existe una coincidencia 100% -> crear SIN punto, exactamente
+            # como apareció por primera vez en la lista.
+            L(f"{tag}No existe coincidencia exacta; creare paciente nuevo sin punto: {nombre}")
+            resultado_creacion = crear_paciente(page, pac)
+
+            # 4) Último recurso: Toronja no permitió crearlo sin punto porque
+            # ya existe en su base, aunque el autocomplete no mostró una
+            # coincidencia exacta. Solo en este caso se crea con punto final.
+            if resultado_creacion == "existe":
+                nombre_pto = nombre_con_punto(nombre)
+                pac_pto = pac.copy()
+                pac_pto["nombre"] = nombre_pto
+                L(f"{tag}Ultimo recurso: creare paciente nuevo con punto: {nombre_pto}")
+                crear_paciente(page, pac_pto)
+                time.sleep(1)
+                escribir(page, "#nuevo_cliente", nombre_pto, delay=DELAY_NOMBRE)
+                if autocomplete(
+                        page, nombre_pto, t=T_PACIENTE_CREADO, exacto=True):
+                    return True
+                L(f"{tag}No pude seleccionar paciente con punto: {nombre_pto}")
+                return False
+
             time.sleep(1)
-            escribir(page, "#nuevo_cliente", nombre_pto, delay=85)
-            if autocomplete(page, nombre_pto, t=14000, exacto=True):
+            escribir(page, "#nuevo_cliente", nombre, delay=DELAY_NOMBRE)
+            if autocomplete(page, nombre, t=T_PACIENTE_CREADO, exacto=True):
                 return True
 
             L(f"{tag}No pude seleccionar paciente exacto: {nombre}")
@@ -3822,7 +3905,12 @@ class MainApp:
             self._log("Faltan LAB_BOT_USER o LAB_BOT_PASS")
             self.bot_activo = False; return
         LAB_URL  = f"{LAB_BASE_URL}/nuevo"
-        T_PAC = 1.8; MAX_INT = 4; L = self._log
+        T_PAC = 1.8
+        MAX_INT = 4
+        T_BUSQUEDA_PACIENTE = 4500
+        T_PACIENTE_CREADO   = 7000
+        DELAY_NOMBRE        = 55
+        L = self._log
 
         def esperar(page, sel, t=7000):
             try: page.wait_for_selector(sel, state="visible", timeout=t); return True
@@ -3876,7 +3964,8 @@ class MainApp:
                 return True
             return False
 
-        def autocomplete(page, buscar, t=9000, exacto=False, estudio=False):
+        def autocomplete(page, buscar, t=9000, exacto=False, estudio=False,
+                         resultado_detallado=False):
             try:
                 page.wait_for_selector(
                     "ul.ui-autocomplete:visible li.ui-menu-item",
@@ -3884,7 +3973,7 @@ class MainApp:
                 )
             except PWT:
                 L(f"  Sin autocomplete: {buscar}")
-                return False
+                return "sin_opciones" if resultado_detallado else False
 
             items = page.locator(
                 "ul.ui-autocomplete:visible li.ui-menu-item"
@@ -3928,7 +4017,7 @@ class MainApp:
                 if not estudio and nombre_paciente_igual(txt, bu):
                     items.nth(i).click()
                     time.sleep(0.5)
-                    return True
+                    return "exacto" if resultado_detallado else True
 
             # Si hay varias opciones y se pidió exactitud
             if estudio:
@@ -3956,7 +4045,7 @@ class MainApp:
                     f"  Sin coincidencia exacta para "
                     f"'{buscar}'. Opciones: {opciones}"
                 )
-                return False
+                return "opciones" if resultado_detallado else False
 
             # Coincidencia parcial
             for i in range(count):
@@ -4017,8 +4106,9 @@ class MainApp:
 
             page.click("#NuevoCliente"); time.sleep(3)
             if modal_vis(page):
-                titulo, _ = leer_modal(page)
-                if "ya existe" in titulo.lower() or "base de datos" in titulo.lower():
+                titulo, sub = leer_modal(page)
+                mensaje_modal = f"{titulo} {sub}".lower()
+                if "ya existe" in mensaje_modal or "base de datos" in mensaje_modal:
                     L("  Paciente ya existe; reintentare seleccion exacta")
                     for _ in range(2):
                         cerrar_esc(page)
@@ -4034,25 +4124,52 @@ class MainApp:
             if not nombre:
                 return False
 
-            # 1) Buscar tal cual esta escrito en la lista
-            escribir(page, "#nuevo_cliente", nombre, delay=85)
-            if autocomplete(page, nombre, t=12000, exacto=True):
+            # 1) Buscar tal cual esta escrito en la lista.
+            # Solo se intenta la variante con punto cuando el portal sí ofrece
+            # opciones, pero ninguna coincide exactamente con el nombre.
+            escribir(page, "#nuevo_cliente", nombre, delay=DELAY_NOMBRE)
+            resultado = autocomplete(
+                page, nombre, t=T_BUSQUEDA_PACIENTE, exacto=True,
+                resultado_detallado=True)
+            if resultado == "exacto":
                 return True
 
-            # 2) Buscar con punto final (variante ya registrada en el sistema)
-            nombre_pto = nombre_con_punto(nombre)
-            escribir(page, "#nuevo_cliente", nombre_pto, delay=85)
-            if autocomplete(page, nombre_pto, t=12000, exacto=True):
-                return True
+            # 2) Hay candidatos parecidos: probar la variante ya registrada
+            # con punto final. Si tampoco es exacta, no se conserva el punto.
+            if resultado == "opciones":
+                nombre_pto = nombre_con_punto(nombre)
+                escribir(page, "#nuevo_cliente", nombre_pto, delay=DELAY_NOMBRE)
+                resultado_pto = autocomplete(
+                    page, nombre_pto, t=T_BUSQUEDA_PACIENTE, exacto=True,
+                    resultado_detallado=True)
+                if resultado_pto == "exacto":
+                    return True
 
-            # 3) No existe -> crear paciente nuevo, siempre con punto final
-            pac_pto = pac.copy()
-            pac_pto["nombre"] = nombre_pto
-            L(f"  No existe '{nombre}' ni '{nombre_pto}'; creare paciente nuevo: {nombre_pto}")
-            crear_paciente(page, pac_pto)
+            # 3) No existe una coincidencia 100% -> crear SIN punto, exactamente
+            # como apareció por primera vez en la lista.
+            L(f"  No existe coincidencia exacta; creare paciente nuevo sin punto: {nombre}")
+            resultado_creacion = crear_paciente(page, pac)
+
+            # 4) Último recurso: Toronja no permitió crearlo sin punto porque
+            # ya existe en su base, aunque el autocomplete no mostró una
+            # coincidencia exacta. Solo en este caso se crea con punto final.
+            if resultado_creacion == "existe":
+                nombre_pto = nombre_con_punto(nombre)
+                pac_pto = pac.copy()
+                pac_pto["nombre"] = nombre_pto
+                L(f"  Ultimo recurso: creare paciente nuevo con punto: {nombre_pto}")
+                crear_paciente(page, pac_pto)
+                time.sleep(1)
+                escribir(page, "#nuevo_cliente", nombre_pto, delay=DELAY_NOMBRE)
+                if autocomplete(
+                        page, nombre_pto, t=T_PACIENTE_CREADO, exacto=True):
+                    return True
+                L(f"  No pude seleccionar paciente con punto: {nombre_pto}")
+                return False
+
             time.sleep(1)
-            escribir(page, "#nuevo_cliente", nombre_pto, delay=85)
-            if autocomplete(page, nombre_pto, t=14000, exacto=True):
+            escribir(page, "#nuevo_cliente", nombre, delay=DELAY_NOMBRE)
+            if autocomplete(page, nombre, t=T_PACIENTE_CREADO, exacto=True):
                 return True
 
             L(f"  No pude seleccionar paciente exacto: {nombre}")
