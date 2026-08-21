@@ -352,13 +352,15 @@ DOCTORES_OPCIONES = [
     "UMF 55 CANANEA",
     "UMF 68 HERMOSILLO",
     "HGU HOSPITAL GENERAL DE URES",
+    "HGM HOSPITAL GENERAL DE MOCTEZUMA",
+    "HGC HOSPITAL GENERAL DE CABORCA",
 ]
 
 # ── Auto-actualización (GitHub Releases) ─────────────────────────────────────
 # Sube cada nuevo .exe como "Release" en este repositorio (puede ser privado);
 # la app consulta la API de GitHub para saber si hay una versión más nueva.
 # IMPORTANTE: al sacar una versión nueva, recuerda subir también este número.
-APP_VERSION = "5.9"
+APP_VERSION = "6.0"
 GITHUB_REPO = "Felixpe4/FluxLab2.0"
 
 def _version_tupla(version: str) -> tuple:
