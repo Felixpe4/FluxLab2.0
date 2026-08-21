@@ -351,13 +351,14 @@ DOCTORES_OPCIONES = [
     "UMF 51 PUERTO LIBERTAD",
     "UMF 55 CANANEA",
     "UMF 68 HERMOSILLO",
+    "HGU HOSPITAL GENERAL DE URES",
 ]
 
 # ── Auto-actualización (GitHub Releases) ─────────────────────────────────────
 # Sube cada nuevo .exe como "Release" en este repositorio (puede ser privado);
 # la app consulta la API de GitHub para saber si hay una versión más nueva.
 # IMPORTANTE: al sacar una versión nueva, recuerda subir también este número.
-APP_VERSION = "5.8"
+APP_VERSION = "5.9"
 GITHUB_REPO = "Felixpe4/FluxLab2.0"
 
 def _version_tupla(version: str) -> tuple:
@@ -381,13 +382,7 @@ def _guardar_cache_update(version: str) -> None:
         pass
 
 def _contexto_ssl_actualizaciones():
-    """Contexto HTTPS con certificados incluidos en el ejecutable.
-
-    Algunas computadoras Windows, especialmente instalaciones antiguas o
-    administradas, no exponen correctamente su almacén de certificados al
-    OpenSSL empaquetado por Python. Certifi permite validar GitHub sin depender
-    de que esa PC tenga configuradas las rutas internas de certificados.
-    """
+    """Contexto HTTPS con certificados incluidos en el ejecutable."""
     import ssl
     try:
         import certifi
@@ -907,6 +902,7 @@ CATALOGO = {
     "MG":"MAGNESIO", "MAGNESIO": "MAGNESIO", "CA":"CALCIO SERICO", "CALCIO SERICO": "CALCIO SERICO", "ALB":"ALBUMINA", "ALBUMINA": "ALBUMINA",
     "AMY":"AMILASA", "AMILASA": "AMILASA", "PTO":"PROTEINAS TOTALES SERICAS",  "PROTEINAS TOTALES SERICAS": "PROTEINAS TOTALES SERICAS", "PTO24":"PTORINA", "PTORINA": "PTORINA",
     "COLESTEROL TOTAL":"COLESTEROL", "COLESTEROL": "COLESTEROL",
+    "TRIG": "TRIGLICERIDOS", "TRIGLICERIDOS": "TRIGLICERIDOS", "TRIGLICÉRIDOS": "TRIGLICERIDOS",
     "ALT":"TGP","AST":"TGO", "TGP": "TGP", "TGO": "TGO", "ASPARTATOAMINOTRANSFERASA (TGO)": "TGO", "ALANINOAMINOTRANSFERASA (TGP)": "TGP", "PROTEINAS TOTALES": "PROTEINAS TOTALES SERICAS",
     "GGT":"GAMA GLUTAMIL TRANSPEPTIDASA", "GAMA GLUTAMIL TRANSPEPTIDASA": "GAMA GLUTAMIL TRANSPEPTIDASA", "GAMAGLUTAMILTRANSPEPTIDASA": "GAMA GLUTAMIL TRANSPEPTIDASA",
     "ALP":"FOSFATASA ALCALINA", "FOSFATASA ALCALINA": "FOSFATASA ALCALINA", "CHOL":"COLESTEROL",
@@ -933,13 +929,108 @@ CATALOGO = {
     "VDRL": "VDRL", "IGG": "INMUNOGLOBULINA G IgG", "INMUNOGLOBULINA G IgG": "INMUNOGLOBULINA G IgG", "HCA":"HORMONA DEL CRECIMIENTO", "HORMONA DEL CRECIMIENTO": "HORMONA DEL CRECIMIENTO", 
     "CAL24":"CAU4", "CALCIO EN ORINA 24 HORAS":"CAU4",  "CAU4": "CAU4",
     "ACAN": "SSA", "SSA": "SSA", "ACAS": "SMITH", "SMITH": "SMITH", "MPO": "MIELO", "MIELO": "MIELO", "ACAP": "ANTICUERPOS ANTI-CITOPLASMA C-ANCA", "ANTICUERPOS ANTI-CITOPLASMA C-ANCA": "ANTICUERPOS ANTI-CITOPLASMA C-ANCA", 
-    "CARGA VIRAL DE VIH-1": "CARGA VIRAL DE VIH", "ACAV": "VAL", "VD25": "25 H", "VD": "25 H", "HIDROXICOLECALCIFEROL": "25 H",
+    "CARGA VIRAL DE VIH-1": "CARGA VIRAL DE VIH", "CARGA VIRAL DE VIH": "CARGA VIRAL DE VIH", "ACAV": "VAL", "VD25": "25 H", "VD": "25 H", "HIDROXICOLECALCIFEROL": "25 H",
 }
 
 # ── v4.2: EXPANSIONES — un término → lista de estudios reales ─────────────────
 # Ajusta los códigos de cada estudio para que coincidan exactamente con
 # lo que tu sistema acepta en el campo #AgregarEstudios.
 EXPANSIONES: dict[str, list[str]] = {
+    # Perfil de funcion hepatica.
+    "PFH": [
+        "BILIRRUBINA TOTAL",
+        "BILIRRUBINA DIRECTA",
+        "TGO",
+        "TGP",
+        "GGT",
+        "FOSFATASA ALCALINA",
+        "DHL",
+    ],
+    "PFH.": [
+        "BILIRRUBINA TOTAL",
+        "BILIRRUBINA DIRECTA",
+        "TGO",
+        "TGP",
+        "GGT",
+        "FOSFATASA ALCALINA",
+        "DHL",
+    ],
+    "P.F.H.": [
+        "BILIRRUBINA TOTAL",
+        "BILIRRUBINA DIRECTA",
+        "TGO",
+        "TGP",
+        "GGT",
+        "FOSFATASA ALCALINA",
+        "DHL",
+    ],
+
+    # Paquete de lipidos usado en las listas HGU.
+    "LIPIDOS": [
+        "COLESTEROL",
+        "HDL",
+        "TRIGLICERIDOS",
+    ],
+    "LÍPIDOS": [
+        "COLESTEROL",
+        "HDL",
+        "TRIGLICERIDOS",
+    ],
+    "LIPIDOS.": [
+        "COLESTEROL",
+        "HDL",
+        "TRIGLICERIDOS",
+    ],
+    "LÍPIDOS.": [
+        "COLESTEROL",
+        "HDL",
+        "TRIGLICERIDOS",
+    ],
+
+    # Quimica sanguinea de 3 elementos.
+    "QS3": [
+        "GLUCOSA",
+        "UREA",
+        "CREATININA",
+    ],
+    "QS 3": [
+        "GLUCOSA",
+        "UREA",
+        "CREATININA",
+    ],
+    "QS3.": [
+        "GLUCOSA",
+        "UREA",
+        "CREATININA",
+    ],
+
+    # Quimica sanguinea de 6 elementos. Cada estudio se agrega por separado
+    # para que el autocomplete de Toronja pueda localizarlo y seleccionarlo.
+    "QS6": [
+        "GLUCOSA",
+        "UREA",
+        "CREATININA",
+        "ACIDO URICO",
+        "COLESTEROL",
+        "TRIGLICERIDOS",
+    ],
+    "QS 6": [
+        "GLUCOSA",
+        "UREA",
+        "CREATININA",
+        "ACIDO URICO",
+        "COLESTEROL",
+        "TRIGLICERIDOS",
+    ],
+    "QS6.": [
+        "GLUCOSA",
+        "UREA",
+        "CREATININA",
+        "ACIDO URICO",
+        "COLESTEROL",
+        "TRIGLICERIDOS",
+    ],
+
     # Bilirrubinas — "BILI" (singular) tambien expande a ambas, porque cuando
     # el doctor escribe BILI BILI o solo BILI en quimica sanguinea siempre se
     # ingresan las dos. Mantengo BILIS y BILIRRUBINA(S) como alias.
@@ -1049,10 +1140,7 @@ SELECCION_MANUAL_ESTUDIOS = {
 
 def normalizar_estudio(est: str) -> str:
     e = est.strip().upper()
-    # Hojas de infectología pueden imprimir el mismo estudio varias veces y
-    # acompañarlo de una descripción larga. Resolver estas dos pruebas antes
-    # del catálogo genérico evita que "CARGA VIRAL DE VIH" caiga por error en
-    # la equivalencia corta VIH -> HIV.
+    # Evitar que una descripcion larga de carga viral caiga en VIH -> HIV.
     if "CARGA VIRAL" in e and (
             "VIH" in e or "INMUNODEFICIENCIA HUMANA" in e):
         return "CARGA VIRAL DE VIH"
