@@ -360,7 +360,7 @@ DOCTORES_OPCIONES = [
 # Sube cada nuevo .exe como "Release" en este repositorio (puede ser privado);
 # la app consulta la API de GitHub para saber si hay una versión más nueva.
 # IMPORTANTE: al sacar una versión nueva, recuerda subir también este número.
-APP_VERSION = "6.0"
+APP_VERSION = "6.1"
 GITHUB_REPO = "Felixpe4/FluxLab2.0"
 
 def _version_tupla(version: str) -> tuple:
@@ -488,7 +488,18 @@ def preparar_actualizacion(url_descarga: str, version_nueva: str,
     # canónico y limpia el duplicado.
     exe_en_ejecucion = pathlib.Path(sys.executable)
     exe_destino = exe_en_ejecucion.with_name("FluxLab.exe")
-    exe_nuevo = exe_en_ejecucion.with_name("_FluxLab_actualizacion.exe")
+    # Descargar fuera del Escritorio evita intentar sobrescribir una copia
+    # temporal que por error haya quedado abierta en una actualización vieja.
+    carpeta_updates = pathlib.Path(
+        os.getenv("LOCALAPPDATA") or os.getenv("TEMP") or str(APP_DIR)
+    ) / "FluxLab" / "updates"
+    try:
+        carpeta_updates.mkdir(parents=True, exist_ok=True)
+    except Exception as e:
+        L(f"  No se pudo preparar la carpeta temporal de actualizaciones: {e}")
+        return False
+    version_archivo = re.sub(r"[^0-9A-Za-z._-]+", "_", str(version_nueva))
+    exe_nuevo = carpeta_updates / f"FluxLab_{version_archivo}.download.exe"
     try:
         exe_nuevo.unlink(missing_ok=True)
     except Exception:
@@ -579,7 +590,7 @@ def preparar_actualizacion(url_descarga: str, version_nueva: str,
     # relanzamiento. Se ejecuta con -ExecutionPolicy Bypass para que funcione
     # en cualquier PC sin importar la política de ejecución configurada.
     pid_app = os.getpid()
-    ps_path = exe_en_ejecucion.with_name("_actualizar_fluxlab.ps1")
+    ps_path = carpeta_updates / "actualizar_fluxlab.ps1"
 
     def ps_literal(valor) -> str:
         return str(valor).replace("'", "''")
@@ -621,7 +632,7 @@ def preparar_actualizacion(url_descarga: str, version_nueva: str,
         "    }\r\n"
         "    Move-Item -LiteralPath $nuevo -Destination $destino -Force\r\n"
         "\r\n"
-        "    # Si se ejecutó una copia llamada _nuevo, eliminarla al quedar libre.\r\n"
+        "    # Si se ejecutó una copia temporal/antigua, eliminarla al quedar libre.\r\n"
         "    if ($ejecutando -ne $destino -and (Test-Path -LiteralPath $ejecutando)) {\r\n"
         "        Remove-Item -LiteralPath $ejecutando -Force -ErrorAction SilentlyContinue\r\n"
         "    }\r\n"
@@ -631,8 +642,10 @@ def preparar_actualizacion(url_descarga: str, version_nueva: str,
         "    Get-ChildItem -LiteralPath $carpeta -File -ErrorAction SilentlyContinue |\r\n"
         "        Where-Object {\r\n"
         "            $_.FullName -ne $destino -and\r\n"
-        "            $_.Name -match '^FluxLab_(nuevo|anterior|viejo|backup).*[.]exe$'\r\n"
+        "            $_.Name -match '^_?FluxLab_(actualizacion|nuevo|anterior|viejo|backup).*[.]exe$'\r\n"
         "        } | Remove-Item -Force -ErrorAction SilentlyContinue\r\n"
+        "    Remove-Item -LiteralPath (Join-Path $carpeta '_actualizar_fluxlab.ps1') -Force -ErrorAction SilentlyContinue\r\n"
+        "    Remove-Item -LiteralPath (Join-Path $carpeta '_actualizar_fluxlab.bat') -Force -ErrorAction SilentlyContinue\r\n"
         "\r\n"
         "    Start-Process -FilePath $destino -WorkingDirectory $carpeta\r\n"
         "    Start-Sleep -Seconds 2\r\n"
@@ -676,7 +689,7 @@ def preparar_actualizacion(url_descarga: str, version_nueva: str,
     except Exception as e:
         # Fallback a .bat si PowerShell no está disponible
         L(f"  PowerShell no disponible ({e}), usando método alternativo...")
-        bat_path = exe_en_ejecucion.with_name("_actualizar_fluxlab.bat")
+        bat_path = carpeta_updates / "actualizar_fluxlab.bat"
         bat = (
             "@echo off\r\nsetlocal enabledelayedexpansion\r\n"
             f"set PID={pid_app}\r\nset \"ACTUAL={exe_en_ejecucion}\"\r\n"
